@@ -1,5 +1,9 @@
 # NetworkMagpie : audit réseau multi-constructeur
 
+[![Python Version](https://img.shields.io/badge/python-3.8+-blue.svg)]()
+[![Netmiko Version](https://img.shields.io/badge/netmiko-4.5+-blue.svg)]()
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+
 NetworkMagpie est une collection de scripts Python conçus pour réaliser des audits de configuration et de sécurité sur des équipements réseau de différents constructeurs. Actuellement, il supporte les équipements Cisco IOS-XE et une prise en charge pour Aruba OS-CX est en cours de développement actif.
 
 L'objectif est de fournir des rapports clairs et exploitables pour aider les administrateurs réseau à maintenir la conformité, la sécurité et la performance de leurs infrastructures.
@@ -29,6 +33,27 @@ L'objectif est de fournir des rapports clairs et exploitables pour aider les adm
 * Sorties Multiples :
     - Rapport JSON détaillé pour chaque type d'équipement.
     - Rapport Excel multi-feuilles avec mise en forme conditionnelle (couleurs vert/orange/rouge) pour une lisibilité accrue.
+
+
+## Aperçu des Rapports Excel
+
+Voici un aperçu des différentes feuilles générées dans le rapport Excel :
+
+1.  **Feuille "Infos Générales" :** Vue sommaire de l'équipement.
+    ![Aperçu Infos Générales](imgs/audit01.png)
+
+2.  **Feuille "Interfaces" :** Détail des interfaces physiques et virtuelles.
+    ![Aperçu Interfaces](imgs/audit02.png)
+
+3.  **Feuille "VLANs" :** Liste des VLANs et de leurs ports.
+    ![Aperçu VLANs](imgs/audit03.png)
+
+4.  **Feuille "Table ARP" :** Contenu de la table ARP de l'équipement.
+    ![Aperçu Table ARP](imgs/audit04.png)
+
+5.  **Feuille "Audit Sécurité" :** Résultats des vérifications de sécurité avec niveaux de criticité.
+    ![Aperçu Audit Sécurité](imgs/audit05.png)
+
 
 ## Prérequis
 
