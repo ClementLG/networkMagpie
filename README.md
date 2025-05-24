@@ -1,4 +1,4 @@
-# NetworkMagpie: Outil d'Audit Réseau Multi-Constructeur
+# NetworkMagpie : audit réseau multi-constructeur
 
 NetworkMagpie est une collection de scripts Python conçus pour réaliser des audits de configuration et de sécurité sur des équipements réseau de différents constructeurs. Actuellement, il supporte les équipements Cisco IOS-XE et une prise en charge pour Aruba OS-CX est en cours de développement actif.
 
