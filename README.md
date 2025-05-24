@@ -4,6 +4,8 @@
 [![Netmiko Version](https://img.shields.io/badge/netmiko-4.5+-blue.svg)]()
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
+![logo](imgs/logomagpie.png)
+
 NetworkMagpie est une collection de scripts Python conçus pour réaliser des audits de configuration et de sécurité sur des équipements réseau de différents constructeurs. Actuellement, il supporte les équipements Cisco IOS-XE et une prise en charge pour Aruba OS-CX est en cours de développement actif.
 
 L'objectif est de fournir des rapports clairs et exploitables pour aider les administrateurs réseau à maintenir la conformité, la sécurité et la performance de leurs infrastructures.
