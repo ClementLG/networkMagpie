@@ -53,6 +53,7 @@ def set_cell_status_color(cell, level):
 # --- Fonctions de collecte Aruba OS-CX ---
 def get_aruba_device_info(net_connect):
     info = {'hostname': 'N/A', 'ios_version': 'N/A', 'model': 'N/A', 'serial_number': 'N/A', 'uptime': 'N/A'}
+    raw_sys_data = ""  # Pour stocker la sortie brute de 'show system' si nécessaire
     try:
         prompt_hostname = net_connect.base_prompt
         if prompt_hostname:
@@ -60,45 +61,49 @@ def get_aruba_device_info(net_connect):
             cleaned_prompt = cleaned_prompt.splitlines()[-1]
             if cleaned_prompt: info['hostname'] = cleaned_prompt
 
-        raw_sys_data = ""
-        system_out = None
+        # 1. Tenter 'show system' avec TextFSM
+        system_out_textfsm = None
         try:
-            # Tenter de parser 'show system' avec TextFSM (peut échouer si template absent/incompatible)
-            system_out = net_connect.send_command("show system", use_textfsm=True, expect_string=r"#")
-            if system_out and isinstance(system_out, list) and system_out[0]:
-                sys_data = system_out[0]
-                info['hostname'] = sys_data.get('hostname', info['hostname'])
-                info['model'] = sys_data.get('product_name', sys_data.get('model', 'N/A'))
-                info['serial_number'] = sys_data.get('chassis_serial_nbr', sys_data.get('serial_number', 'N/A'))
-                if sys_data.get('up_time') and sys_data.get('up_time', '').strip() and sys_data.get('up_time',
-                                                                                                    'N/A') != 'N/A':
-                    info['uptime'] = sys_data['up_time'].strip()
-            else:
-                raise ValueError("TextFSM pour 'show system' n'a pas retourné de données valides.")
+            system_out_textfsm = net_connect.send_command("show system", use_textfsm=True, expect_string=r"#")
+            if system_out_textfsm and isinstance(system_out_textfsm, list) and system_out_textfsm[0]:
+                sys_data_textfsm = system_out_textfsm[0]
+                info['hostname'] = sys_data_textfsm.get('hostname', info['hostname'])
+                info['model'] = sys_data_textfsm.get('product_name', sys_data_textfsm.get('model', 'N/A'))
+                info['serial_number'] = sys_data_textfsm.get('chassis_serial_nbr',
+                                                             sys_data_textfsm.get('serial_number', 'N/A'))
+                if sys_data_textfsm.get('up_time') and sys_data_textfsm.get('up_time', 'N/A') != 'N/A':
+                    info['uptime'] = sys_data_textfsm['up_time'].strip()
+            # else: # TextFSM a retourné quelque chose de non conforme, on passera au parsing brut
+            # print(f"  [AVERTISSEMENT] TextFSM 'show system' sur {net_connect.host} n'a pas retourné les données attendues.")
         except (TextFSMError, ValueError, IndexError) as e:
-            # print(f"  [AVERTISSEMENT] TextFSM/Parsing pour 'show system' sur {net_connect.host} a échoué: {e}. Passage en mode brut.")
-            raw_sys_data = net_connect.send_command("show system", use_textfsm=False, expect_string=r"#")
-            # print(f"DEBUG: Host {net_connect.host} - raw 'show system':\n{raw_sys_data}\n--------------------")
+            print(
+                f"  [AVERTISSEMENT] TextFSM pour 'show system' sur {net_connect.host} a échoué: {e}. Passage en mode brut.")
 
-            match_hostname_sys = re.search(r"Hostname\s*:\s*(\S+)", raw_sys_data, re.IGNORECASE)
-            if match_hostname_sys: info['hostname'] = match_hostname_sys.group(1).strip()
+        # 2. Si des infos manquent après TextFSM pour 'show system', utiliser le parsing brut
+        if info['model'] == 'N/A' or info['serial_number'] == 'N/A' or info['uptime'] == 'N/A':
+            if not raw_sys_data:  # Récupérer la sortie brute si ce n'est pas déjà fait
+                raw_sys_data = net_connect.send_command("show system", use_textfsm=False, expect_string=r"#")
+            # print(f"DEBUG: Host {net_connect.host} - raw 'show system' (pour fallback info): \n{raw_sys_data}\n--------------------")
 
-            match_model_sys = re.search(r"Product Name\s*:\s*([^\r\n]+)", raw_sys_data, re.IGNORECASE)  # Modifié
-            if match_model_sys: info['model'] = match_model_sys.group(1).strip()
+            if info['model'] == 'N/A':
+                match_model_sys = re.search(r"Product Name\s*:\s*([^\r\n]+)", raw_sys_data, re.IGNORECASE)
+                if match_model_sys: info['model'] = match_model_sys.group(1).strip()
 
-            match_serial_sys = re.search(r"Chassis Serial Nbr\s*:\s*(\S+)", raw_sys_data, re.IGNORECASE)  # Modifié
-            if match_serial_sys: info['serial_number'] = match_serial_sys.group(1).strip()
+            if info['serial_number'] == 'N/A':
+                match_serial_sys = re.search(r"Chassis Serial Nbr\s*:\s*(\S+)", raw_sys_data, re.IGNORECASE)
+                if match_serial_sys: info['serial_number'] = match_serial_sys.group(1).strip()
 
-            match_uptime_sys = re.search(r"Up Time\s*:\s*(.+)", raw_sys_data, re.IGNORECASE)  # Modifié
-            if match_uptime_sys: info['uptime'] = match_uptime_sys.group(1).strip()
+            if info['uptime'] == 'N/A':  # Uptime spécifique de 'show system'
+                match_uptime_sys = re.search(r"Up Time\s*:\s*(.+)", raw_sys_data, re.IGNORECASE)
+                if match_uptime_sys: info['uptime'] = match_uptime_sys.group(1).strip()
 
-        version_out = None
+        # 3. Obtenir la version OS depuis 'show version' (plus spécifique pour la version)
+        version_out_textfsm = None
         try:
-            version_out = net_connect.send_command("show version", use_textfsm=True, expect_string=r"#")
-            if version_out and isinstance(version_out, list) and version_out[0]:
-                ver_data = version_out[0]
+            version_out_textfsm = net_connect.send_command("show version", use_textfsm=True, expect_string=r"#")
+            if version_out_textfsm and isinstance(version_out_textfsm, list) and version_out_textfsm[0]:
+                ver_data = version_out_textfsm[0]
                 if info['hostname'] == 'N/A' and ver_data.get('hostname'): info['hostname'] = ver_data.get('hostname')
-                # Essayer plusieurs clés possibles pour la version retournée par TextFSM
                 info['ios_version'] = ver_data.get('version',
                                                    ver_data.get('software_version',
                                                                 ver_data.get('os_version',
@@ -107,16 +112,16 @@ def get_aruba_device_info(net_connect):
             else:
                 raise ValueError("TextFSM pour 'show version' n'a pas retourné de données valides.")
         except (TextFSMError, ValueError, IndexError) as e:
+            # print(f"  [AVERTISSEMENT] TextFSM/Parsing 'show version' sur {net_connect.host} a échoué: {e}. Mode brut.") # Logged par console
             raw_ver_data = net_connect.send_command("show version", use_textfsm=False, expect_string=r"#")
             if info['hostname'] == 'N/A':
                 match_hostname_ver = re.search(r"Hostname\s*:\s*(\S+)", raw_ver_data, re.IGNORECASE)
                 if match_hostname_ver: info['hostname'] = match_hostname_ver.group(1)
-            # Regex pour version, incluant "ArubaOS-CX Version" de votre output
             match_version_ver = re.search(r"(?:ArubaOS-CX Version|Software version|Version)\s*:\s*(\S+)", raw_ver_data,
                                           re.IGNORECASE)
             if match_version_ver: info['ios_version'] = match_version_ver.group(1)
 
-        # Si l'uptime n'a toujours pas été trouvé via 'show system' (TextFSM ou brut), essayer 'show uptime'
+        # 4. Si l'uptime n'a toujours pas été trouvé, essayer 'show uptime' comme dernier recours
         if info.get('uptime', 'N/A') == 'N/A':
             uptime_out_raw = net_connect.send_command("show uptime", expect_string=r"#", use_textfsm=False)
             match_uptime_cmd = re.search(r"(?:System Uptime|Uptime is)\s*:\s*(.+)", uptime_out_raw, re.IGNORECASE)
@@ -126,7 +131,7 @@ def get_aruba_device_info(net_connect):
     except Exception as e:
         print(f"  Erreur critique get_aruba_device_info: {e}")
         traceback.print_exc()
-        return info
+        return info  # Retourner ce qui a été collecté jusqu'à présent
 
 
 def get_aruba_interfaces(net_connect):
