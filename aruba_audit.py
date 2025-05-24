@@ -788,7 +788,8 @@ def load_inventory(filepath="inventory.csv"):
                         f"Erreur: En-tête inventaire '{filepath}' doit avoir au moins 3 colonnes (hostname, group, device_type).")
                     return None
             except StopIteration:
-                print(f"Avertissement: Fichier inventaire '{filepath}' vide."); return []
+                print(f"Avertissement: Fichier inventaire '{filepath}' vide.");
+                return []
             for row in reader:
                 if len(row) >= 3 and row[0].strip():
                     inventory.append(
@@ -797,9 +798,12 @@ def load_inventory(filepath="inventory.csv"):
                     print(f"Avertissement: Ligne inventaire mal formatée: {row}")
         return inventory
     except FileNotFoundError:
-        print(f"Erreur: Fichier inventaire '{filepath}' non trouvé."); return None
+        print(f"Erreur: Fichier inventaire '{filepath}' non trouvé.");
+        return None
     except Exception as e:
-        print(f"Erreur lecture '{filepath}': {e}"); traceback.print_exc(); return None
+        print(f"Erreur lecture '{filepath}': {e}");
+        traceback.print_exc();
+        return None
 
 
 def load_passwords(filepath="passwords.csv"):
@@ -810,7 +814,8 @@ def load_passwords(filepath="passwords.csv"):
             try:
                 next(reader)
             except StopIteration:
-                print(f"Avertissement: Fichier passwords '{filepath}' vide."); return {}
+                print(f"Avertissement: Fichier passwords '{filepath}' vide.");
+                return {}
             for row in reader:
                 if len(row) >= 3 and row[0].strip():
                     enable_pass = row[3].strip() if len(row) > 3 and row[3].strip() else None
@@ -820,9 +825,12 @@ def load_passwords(filepath="passwords.csv"):
                     print(f"Avertissement: Ligne passwords mal formatée: {row}")
         return passwords
     except FileNotFoundError:
-        print(f"Erreur: Fichier passwords '{filepath}' non trouvé."); return None
+        print(f"Erreur: Fichier passwords '{filepath}' non trouvé.");
+        return None
     except Exception as e:
-        print(f"Erreur lecture '{filepath}': {e}"); traceback.print_exc(); return None
+        print(f"Erreur lecture '{filepath}': {e}");
+        traceback.print_exc();
+        return None
 
 
 def generate_excel_report(all_data, excel_filepath):
@@ -914,7 +922,8 @@ def generate_excel_report(all_data, excel_filepath):
             set_cell_status_color(lc, check_data.get("level"))
     auto_fit_columns(ws_security)
     try:
-        wb.save(excel_filepath); print(f"\n[+] Rapport Excel Aruba généré : {excel_filepath}")
+        wb.save(excel_filepath);
+        print(f"\n[+] Rapport Excel Aruba généré : {excel_filepath}")
     except Exception as e:
         print(f"\n[-] Erreur sauvegarde Excel Aruba: {e}")
 
@@ -999,7 +1008,8 @@ def main_aruba():
         try:
             os.makedirs(output_directory)
         except OSError as e:
-            print(f"Erreur création répertoire '{output_directory}': {e}"); return
+            print(f"Erreur création répertoire '{output_directory}': {e}");
+            return
 
     full_inventory = load_inventory(inventory_file)
     passwords_map = load_passwords(password_file)
