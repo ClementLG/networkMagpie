@@ -435,67 +435,247 @@ def get_arp_table(net_connect):
 
 def check_security_features(net_connect, running_config):
     security_audit = {}
-    # ... (Contenu de la fonction check_aruba_security_features comme dans la version précédente)
+    virtual_prefixes = ("vlan", "loopback", "lag")  # Utilisé pour le check des ports inutilisés
+
+    # --- I. AAA & Authentification & Accès Management ---
     if "aaa authentication port-access" in running_config:
-        security_audit["aaa_port_access"] = {"status": True, "level": "good",
-                                             "details": "AAA pour l'accès port est configuré."}
+        security_audit["aaa_port_access_configured"] = {"status": True, "level": "good",
+                                                        "details": "AAA pour l'accès port (dot1x/mac-auth) semble configuré. Vérifier les détails de la configuration."}
     else:
-        security_audit["aaa_port_access"] = {"status": False, "level": "warning",
-                                             "details": "AAA pour l'accès port non configuré."}
+        security_audit["aaa_port_access_configured"] = {"status": False, "level": "warning",
+                                                        "details": "AAA pour l'accès port (dot1x/mac-auth) non détecté. Recommandé pour sécuriser l'accès au réseau."}
+
+    local_user_passwords_encrypted = True  # Par défaut
+    if re.search(r"user\s+\S+\s+password\s+plaintext", running_config):
+        local_user_passwords_encrypted = False
+
+    if local_user_passwords_encrypted and "password" in running_config:  # Si 'password' est trouvé mais pas 'plaintext'
+        security_audit["local_user_password_encryption"] = {"status": "Chiffré (haché)", "level": "good",
+                                                            "details": "Les mots de passe des utilisateurs locaux semblent être stockés chiffrés (hachés)."}
+    elif not local_user_passwords_encrypted:
+        security_audit["local_user_password_encryption"] = {"status": "Plaintext détecté", "level": "bad",
+                                                            "details": "Au moins un mot de passe utilisateur local est stocké en clair (plaintext). Utiliser 'password ciphertext <hash>' ou 'password sha256 <hash>'."}
+    else:
+        security_audit["local_user_password_encryption"] = {
+            "status": "Aucun utilisateur local avec mot de passe trouvé ou format inconnu", "level": "warning",
+            "details": "Vérifier manuellement le stockage des mots de passe des utilisateurs locaux."}
+
+    # Politique de complexité des mots de passe
+    # Note: Aruba OS-CX gère cela via 'password-policy' ou des paramètres individuels.
+    # 'show security password-quality' ou 'show password-policy'
+    min_len_str, complexity_str = "Non configuré", "Non configurée"
+    min_len_level, complexity_level = "bad", "bad"
+
     if "password minimum-length" in running_config:
         match_pass_len = re.search(r"password minimum-length\s+(\d+)", running_config)
         min_len = int(match_pass_len.group(1)) if match_pass_len else 0
-        level = "good" if min_len >= 12 else "warning" if min_len >= 8 else "bad"
-        security_audit["password_min_length"] = {"status": f"Longueur min: {min_len}", "level": level,
-                                                 "details": f"Longueur minimale des mots de passe: {min_len}. Recommandé: >=12."}
-    else:
-        security_audit["password_min_length"] = {"status": "Non configuré (défaut)", "level": "bad",
-                                                 "details": "Politique de longueur minimale des mots de passe non configurée."}
-    try:
-        ssh_status_raw = net_connect.send_command("show ssh server", expect_string=r"#")
-        if "SSH server enabled          : Yes" not in ssh_status_raw:
-            security_audit["ssh_status"] = {"status": "Disabled", "level": "bad",
-                                            "details": "Le serveur SSH est désactivé."}
-        elif "Protocol version allowed  : SSHv2" in ssh_status_raw:
-            security_audit["ssh_status"] = {"status": "SSHv2 Only", "level": "good",
-                                            "details": "Serveur SSH activé, SSHv2 uniquement."}
+        min_len_str = f"Longueur min: {min_len}"
+        min_len_level = "good" if min_len >= 12 else "warning" if min_len >= 8 else "bad"
+    security_audit["password_min_length"] = {"status": min_len_str, "level": min_len_level,
+                                             "details": f"{min_len_str}. Recommandé: >=12."}
+
+    # Pour la complexité, OS-CX a 'password complexity [level]' ou 'password-policy <name>' -> 'character-class-check'
+    # Ceci est une vérification simplifiée.
+    if "password complexity" in running_config or "character-class-check" in running_config:
+        complexity_str = "Activée (détails à vérifier)"
+        complexity_level = "good"
+    security_audit["password_complexity"] = {"status": complexity_str, "level": complexity_level,
+                                             "details": f"Politique de complexité des mots de passe: {complexity_str}. Vérifier les exigences spécifiques."}
+
+    # Enable password (équivalent à 'enable secret' sur Cisco)
+    if "enable password" in running_config:  # OS-CX peut utiliser 'enable password [ciphertext|plaintext] ...'
+        if "plaintext" in running_config.split("enable password")[1].splitlines()[0]:
+            security_audit["enable_password_aruba"] = {"status": "Plaintext", "level": "bad",
+                                                       "details": "Le mot de passe 'enable' est stocké en clair. Utiliser une version chiffrée."}
         else:
-            security_audit["ssh_status"] = {"status": "SSH Enabled (check v1)", "level": "warning",
-                                            "details": "Serveur SSH activé, mais vérifier si SSHv1 est désactivé."}
-    except:
-        security_audit["ssh_status"] = {"status": "Erreur", "level": "warning",
-                                        "details": "Impossible de vérifier 'show ssh server'."}
-    banners_set = []
-    if "banner motd" in running_config: banners_set.append("MOTD")
-    if "banner exec" in running_config: banners_set.append("Exec")
-    if "banner login" in running_config: banners_set.append("Login")
-    if banners_set:
-        security_audit["banners"] = {"status": f"Configurées: {', '.join(banners_set)}", "level": "good",
-                                     "details": "Bannières configurées."}
+            security_audit["enable_password_aruba"] = {"status": "Chiffré", "level": "good",
+                                                       "details": "Le mot de passe 'enable' est stocké chiffré."}
     else:
-        security_audit["banners"] = {"status": "Aucune", "level": "warning", "details": "Aucune bannière configurée."}
-    https_enabled = False
+        security_audit["enable_password_aruba"] = {"status": "Non configuré", "level": "bad",
+                                                   "details": "Aucun mot de passe 'enable' configuré."}
+
+    # --- II. Sécurité des Lignes d'Accès (Console) ---
+    # OS-CX utilise 'line console' puis les paramètres dessous
+    console_config_text = ""
+    console_match = re.search(r"line console\s*\n(.*?)(?=line|interface|vlan|router|exit|$)", running_config,
+                              re.DOTALL | re.MULTILINE)
+    if console_match:
+        console_config_text = console_match.group(1)
+
+    if "password " in console_config_text or "login local" in console_config_text or "login group" in console_config_text:
+        security_audit["console_auth"] = {"status": True, "level": "good",
+                                          "details": "Ligne console protégée par méthode de login."}
+    else:
+        security_audit["console_auth"] = {"status": False, "level": "bad",
+                                          "details": "Ligne console non protégée par mot de passe."}
+
+    exec_timeout_con_match = re.search(r"session-timeout\s+(\d+)", console_config_text)  # OS-CX utilise session-timeout
+    if exec_timeout_con_match:
+        minutes_con = int(exec_timeout_con_match.group(1))
+        if minutes_con > 0 and minutes_con <= 15:  # Timeout raisonnable
+            security_audit["console_session_timeout"] = {"status": f"{minutes_con} minutes", "level": "good",
+                                                         "details": "Timeout de session configuré sur console."}
+        elif minutes_con == 0:
+            security_audit["console_session_timeout"] = {"status": "Désactivé (0)", "level": "bad",
+                                                         "details": "Timeout de session console désactivé. Risque."}
+        else:  # Trop long
+            security_audit["console_session_timeout"] = {"status": f"{minutes_con} minutes", "level": "warning",
+                                                         "details": "Timeout de session console élevé. Recommandé : 5-15 min."}
+    else:
+        security_audit["console_session_timeout"] = {"status": "Non configuré (défaut)", "level": "warning",
+                                                     "details": "Aucun timeout de session sur console. Recommandé : 5-15 min."}
+
+    # --- III. Sécurité des Services de Management ---
+    # SSH
+    try:
+        # Utiliser "show ssh server all-vrfs" pour une vue complète
+        ssh_status_raw = net_connect.send_command("show ssh server all-vrfs", expect_string=r"#")
+        # print(f"DEBUG: show ssh server all-vrfs output:\n{ssh_status_raw}") # Pour débogage
+
+        ssh_server_is_enabled = False  # On va le déterminer par la présence de la sortie
+        ssh_v2_is_primary = False
+        ssh_v1_is_active = True  # Supposer actif par défaut si non explicitement désactivé
+
+        if "SSH server configuration on VRF" in ssh_status_raw:  # Indique que le service est configuré
+            ssh_server_is_enabled = True  # Si la section existe, le serveur est au moins configuré globalement
+
+        # Chercher la version SSH globale ou par VRF
+        # L'image montre "SSH Version : 2.0"
+        match_ssh_version = re.search(r"SSH Version\s*:\s*([\d\.]+)", ssh_status_raw)
+        if match_ssh_version and match_ssh_version.group(1) == "2.0":
+            ssh_v2_is_primary = True
+
+        # Sur OS-CX, SSHv1 est désactivé si 'no ssh server v1 enable' est dans la config
+        # ou si 'show ssh server (all-vrfs)' indique explicitement que v1 n'est pas utilisé.
+        # La sortie que vous avez fournie ne mentionne pas SSHv1, ce qui est bon signe.
+        # Netmiko se connecte en SSH, donc le service est actif.
+        # Nous allons vérifier si v1 est explicitement mentionné comme actif ou si v2 n'est pas la seule version.
+
+        # Si la sortie de 'show ssh server all-vrfs' ne contient PAS de référence à SSHv1 actif
+        # et que la version est bien 2.0, on considère que c'est bon.
+        # Une recherche négative de "SSHv1" ou "Version : 1" serait un indicateur.
+        # La sortie que vous avez montrée n'indique PAS de SSHv1.
+
+        # Si on s'est connecté en SSH, le serveur est actif.
+        # La question est de savoir si v1 est aussi actif.
+        # Aruba OS-CX a tendance à être v2 par défaut et v1 doit être explicitement activé (ou désactivé).
+        # Si 'no ssh server v1 enable' est dans la config, c'est une preuve de désactivation.
+
+        v1_disabled_by_config = "no ssh server v1 enable" in running_config
+        v1_explicitly_enabled_in_config = "ssh server v1 enable" in running_config  # Moins probable
+
+        if not ssh_server_is_enabled and "ssh" in str(net_connect.device_type).lower():
+            # Ce cas est pour si 'show ssh server all-vrfs' ne retourne rien de concluant
+            # mais qu'on est connecté en SSH.
+            security_audit["ssh_status"] = {"status": "Activé (connexion SSH active)", "level": "warning",
+                                            "details": "Serveur SSH fonctionnel, mais détails de version/v1 via 'show ssh server all-vrfs' non clairs. Vérifier manuellement."}
+        elif ssh_v2_is_primary and (v1_disabled_by_config or not v1_explicitly_enabled_in_config):
+            # Si la version rapportée est 2.0 et que v1 n'est pas explicitement activé dans la config
+            # (ou mieux, est explicitement désactivé), on considère que c'est bon.
+            security_audit["ssh_status"] = {"status": "SSHv2 Only (probable)", "level": "good",
+                                            "details": "Serveur SSH activé, version 2.0 détectée. SSHv1 semble désactivé."}
+        elif ssh_v2_is_primary and v1_explicitly_enabled_in_config:
+            security_audit["ssh_status"] = {"status": "SSHv2 avec SSHv1 activé", "level": "bad",
+                                            "details": "SSHv2 est utilisé, mais SSHv1 est explicitement activé dans la configuration. Désactiver SSHv1."}
+        else:  # Cas où SSH est actif mais on n'est pas sûr pour v1 et v2 n'est pas clairement la seule.
+            security_audit["ssh_status"] = {"status": "SSH Activé (statut v1 incertain)", "level": "warning",
+                                            "details": "Serveur SSH activé, mais impossible de confirmer la désactivation de SSHv1. Assurer 'no ssh server v1 enable'."}
+
+    except Exception as e_ssh:
+        print(f"  Erreur durant la vérification SSH pour {net_connect.host}: {e_ssh}")
+        security_audit["ssh_status"] = {"status": "Activé (connexion SSH active)", "level": "warning",
+                                        "details": "Serveur SSH fonctionnel (connexion établie), mais la commande 'show ssh server all-vrfs' a échoué. Version et statut de SSHv1 inconnus."}
+
+    # Telnet (OS-CX : 'telnet-server enable' ou 'no telnet-server enable')
+    if "no telnet-server enable" in running_config or "telnet-server" not in running_config:  # Désactivé par défaut ou explicitement
+        security_audit["telnet_server"] = {"status": "Disabled", "level": "good",
+                                           "details": "Serveur Telnet désactivé."}
+    elif "telnet-server enable" in running_config:
+        security_audit["telnet_server"] = {"status": "Enabled", "level": "bad",
+                                           "details": "Serveur Telnet activé. Protocole non chiffré, à désactiver."}
+    else:  # Cas ambigu
+        security_audit["telnet_server"] = {"status": "Statut incertain (non explicitement activé/désactivé)",
+                                           "level": "warning",
+                                           "details": "Vérifier manuellement le statut du serveur Telnet."}
+
+    # HTTP/HTTPS servers
+    https_enabled_in_config = False
     if "https-server" in running_config:
-        https_config_block_match = re.search(r"https-server\s*\n(?:(?!interface|vlan|!).*\n)*?\s*enable",
-                                             running_config, re.MULTILINE)
-        if https_config_block_match:
-            https_enabled = True
-            security_audit["https_server"] = {"status": "Enabled", "level": "good",
-                                              "details": "Serveur HTTPS (web management) activé."}
-    if not https_enabled:
+        https_block_match = re.search(r"https-server\s*\n(.*?)(?=^\S|\Z)", running_config, re.DOTALL | re.MULTILINE)
+        if https_block_match and "enable" in https_block_match.group(1):
+            https_enabled_in_config = True
+
+    if https_enabled_in_config:
+        security_audit["https_server"] = {"status": "Enabled", "level": "good",
+                                          "details": "Serveur HTTPS (web management) activé."}
+    else:
         security_audit["https_server"] = {"status": "Disabled or Not Found", "level": "good",
                                           "details": "Serveur HTTPS non détecté comme activé."}
-    http_enabled = False
-    if "http-server" in running_config:
-        http_config_block_match = re.search(r"http-server\s*\n(?:(?!interface|vlan|!).*\n)*?\s*enable", running_config,
-                                            re.MULTILINE)
-        if http_config_block_match:
-            http_enabled = True
-            security_audit["http_server_explicit"] = {"status": "Enabled", "level": "bad",
-                                                      "details": "Serveur HTTP explicitement activé. Préférer HTTPS ou désactiver."}
-    if not http_enabled:
-        security_audit["http_server_explicit"] = {"status": "Likely Disabled", "level": "good",
-                                                  "details": "Serveur HTTP non explicitement activé."}
+
+    http_enabled_in_config = False
+    if "http-server" in running_config:  # OS-CX a rarement http-server si https est là
+        http_block_match = re.search(r"http-server\s*\n(.*?)(?=^\S|\Z)", running_config, re.DOTALL | re.MULTILINE)
+        if http_block_match and "enable" in http_block_match.group(1):
+            http_enabled_in_config = True
+
+    if http_enabled_in_config:
+        security_audit["http_server"] = {"status": "Enabled", "level": "bad",
+                                         "details": "Serveur HTTP (non sécurisé) activé. À désactiver."}
+    else:
+        security_audit["http_server"] = {"status": "Disabled or Not Found", "level": "good",
+                                         "details": "Serveur HTTP non détecté comme activé."}
+
+    # Banners
+    banners_set = []
+    if "banner motd" in running_config: banners_set.append("MOTD")
+    if "banner exec" in running_config: banners_set.append("Exec")  # Moins courant sur OS-CX
+    if "banner login" in running_config: banners_set.append("Login")  # Moins courant sur OS-CX
+    if banners_set:
+        security_audit["banners_configured"] = {"status": f"Configurées: {', '.join(banners_set)}", "level": "good",
+                                                "details": "Bannières d'avertissement configurées."}
+    else:
+        security_audit["banners_configured"] = {"status": "Aucune", "level": "warning",
+                                                "details": "Aucune bannière d'avertissement configurée. Recommandé pour des raisons légales."}
+
+    # --- IV. Renforcement Général & Services ---
+    # Source Routing (souvent pas une commande explicite 'no ip source-route' sur OS-CX, désactivé par défaut)
+    security_audit["ip_source_route_aruba"] = {"status": "Likely Disabled (default)", "level": "good",
+                                               "details": "Le routage par la source est généralement désactivé par défaut sur OS-CX."}
+
+    # LLDP/CDP (CDP est rare sur Aruba, LLDP est standard)
+    if "no lldp enable" in running_config:  # Si LLDP est explicitement désactivé globalement
+        security_audit["lldp_global_status"] = {"status": "Globally Disabled", "level": "good",
+                                                "details": "LLDP est désactivé globalement."}
+    elif "lldp enable" in running_config or "lldp" in running_config:  # Activé par défaut ou explicitement
+        security_audit["lldp_global_status"] = {"status": "Globally Enabled", "level": "warning",
+                                                "details": "LLDP est activé globalement. Filtrer sur les interfaces non-confiance via 'no lldp tx-enable/rx-enable'."}
+    else:  # Ni l'un ni l'autre, probablement activé par défaut
+        security_audit["lldp_global_status"] = {"status": "Potentially Enabled (default)", "level": "warning",
+                                                "details": "LLDP est probablement activé par défaut. À vérifier."}
+
+    # --- V. Logging & Monitoring ---
+    log_level_details = "N/A"
+    log_level_match = re.search(r"logging severity\s+(\S+)", running_config)
+    if log_level_match: log_level_details = f"Sévérité globale: {log_level_match.group(1)}"
+
+    if "logging syslog host" in running_config or "logging host" in running_config:  # 'logging host <IP>' sur OS-CX
+        security_audit["remote_logging_aruba"] = {"status": True, "level": "good",
+                                                  "details": f"Logging distant (syslog) configuré. {log_level_details}"}
+        if "logging source-interface" in running_config and "loopback" in running_config:  # Bonne pratique
+            src_int_match = re.search(r"logging source-interface\s+(\S+)", running_config)
+            security_audit["logging_source_int_aruba"] = {
+                "status": src_int_match.group(1) if src_int_match else "Configurée", "level": "good",
+                "details": "Interface source pour syslog spécifiée (Loopback est bien)."}
+        else:
+            security_audit["logging_source_int_aruba"] = {"status": False, "level": "warning",
+                                                          "details": "Interface source pour syslog non spécifiée ou pas une loopback."}
+    else:
+        security_audit["remote_logging_aruba"] = {"status": False, "level": "bad",
+                                                  "details": f"Logging distant (syslog) NON configuré. {log_level_details}"}
+        security_audit["logging_source_int_aruba"] = {"status": "N/A", "level": "bad",
+                                                      "details": "Syslog non configuré."}
+
+    # NTP
     ntp_servers_aruba = [line for line in running_config.splitlines() if line.strip().startswith("ntp server")]
     num_ntp_aruba = len(ntp_servers_aruba)
     ntp_sync_level_aruba, ntp_sync_details_aruba, ntp_sync_status_aruba = "warning", "Statut synchro NTP inconnu.", "Error"
@@ -506,39 +686,77 @@ def check_security_features(net_connect, running_config):
             ntp_sync_status_aruba, ntp_sync_details_aruba, ntp_sync_level_aruba = True, f"NTP synchronisé. Stratum: {stratum_match.group(1) if stratum_match else 'N/A'}.", "good"
         else:
             ntp_sync_status_aruba, ntp_sync_details_aruba = False, "NTP non synchronisé."
-            ntp_sync_level_aruba = "bad" if num_ntp_aruba > 0 else "bad"
+            ntp_sync_level_aruba = "bad"  # Non synchro est toujours mauvais
     except:
         ntp_sync_details_aruba = "Statut synchro inconnu ('show ntp status' échoué)."
         ntp_sync_level_aruba = "warning" if num_ntp_aruba > 0 else "bad"
-    security_audit["ntp_sync_aruba"] = {"status": ntp_sync_status_aruba, "level": ntp_sync_level_aruba,
-                                        "details": ntp_sync_details_aruba}
+    security_audit["ntp_synchronization_aruba"] = {"status": ntp_sync_status_aruba, "level": ntp_sync_level_aruba,
+                                                   "details": ntp_sync_details_aruba}
+
     if num_ntp_aruba >= 2:
         security_audit["ntp_redundancy_aruba"] = {"status": f"{num_ntp_aruba} serveurs", "level": "good",
                                                   "details": "Redondance NTP OK."}
     elif num_ntp_aruba == 1:
         security_audit["ntp_redundancy_aruba"] = {"status": "1 serveur", "level": "warning",
-                                                  "details": "Un seul serveur NTP."}
+                                                  "details": "Un seul serveur NTP. Recommandé: >=2."}
     else:
         security_audit["ntp_redundancy_aruba"] = {"status": "0 serveur", "level": "bad",
-                                                  "details": "NTP non configuré."}
+                                                  "details": "NTP non configuré. Temps non fiable."}
+
+    # SNMP
     if "snmp-server community public" in running_config or "snmp-server community private" in running_config:
-        security_audit["snmp_default_comm_aruba"] = {"status": True, "level": "bad",
-                                                     "details": "Communautés SNMP par défaut utilisées."}
+        security_audit["snmp_default_communities_aruba"] = {"status": True, "level": "bad",
+                                                            "details": "Communautés SNMP par défaut (public/private) utilisées. Risque majeur."}
     elif "snmp-server community" in running_config:
-        security_audit["snmp_default_comm_aruba"] = {"status": False, "level": "good",
-                                                     "details": "Communautés SNMP personnalisées."}
+        security_audit["snmp_default_communities_aruba"] = {"status": False, "level": "good",
+                                                            "details": "Communautés SNMP personnalisées. Vérifier les ACLs associées."}
     else:
-        security_audit["snmp_default_comm_aruba"] = {"status": "N/A", "level": "good",
-                                                     "details": "Pas de communautés SNMP v1/v2c configurées."}
-    snmpv3_user_found = "snmp-server user" in running_config
-    snmpv3_group_found = "snmp-server group" in running_config and "v3" in running_config
-    if snmpv3_user_found or snmpv3_group_found:
-        security_audit["snmp_v3_aruba"] = {"status": True, "level": "good", "details": "SNMPv3 semble configuré."}
-    elif "snmp-server community" in running_config:
+        security_audit["snmp_default_communities_aruba"] = {"status": "N/A", "level": "good",
+                                                            "details": "Pas de communautés SNMP v1/v2c configurées."}
+
+    # SNMPv3 (OS-CX utilise 'snmp-server vrf <vrf> user <user> auth ...')
+    snmpv3_user_found = "snmp-server user " in running_config or "snmp-server vrf " in running_config and " user " in running_config  # Recherche simplifiée
+
+    if snmpv3_user_found:
+        security_audit["snmp_v3_aruba"] = {"status": True, "level": "good",
+                                           "details": "SNMPv3 semble configuré (utilisateurs/groupes détectés)."}
+    elif "snmp-server community" in running_config:  # Si pas de v3 mais v1/v2c
         security_audit["snmp_v3_aruba"] = {"status": "v1/v2c only", "level": "bad",
-                                           "details": "SNMPv1/v2c utilisé, préférer v3."}
+                                           "details": "SNMPv1/v2c utilisé (communautés en clair). Préférer SNMPv3."}
     else:
-        security_audit["snmp_v3_aruba"] = {"status": "N/A", "level": "good", "details": "SNMP non configuré."}
+        security_audit["snmp_v3_aruba"] = {"status": "N/A", "level": "good",
+                                           "details": "SNMP (v1/v2c/v3) ne semble pas configuré."}
+
+    # --- VI. Sécurité Couche 2 (Indications) ---
+    # OS-CX: 'spanning-tree port <port> bpdu-protection'
+    if "bpdu-protection" in running_config:  # Recherche globale
+        security_audit["bpdu_protection_aruba"] = {"status": True, "level": "good",
+                                                   "details": "BPDU Protection (Guard) semble être configurée sur certaines interfaces."}
+    else:
+        security_audit["bpdu_protection_aruba"] = {"status": False, "level": "warning",
+                                                   "details": "BPDU Protection non détectée. Recommandé sur les ports d'accès."}
+
+    # OS-CX: 'dhcp-snooping enable' et 'dhcp-snooping vlan <vlan-id> enable'
+    if "dhcp-snooping enable" in running_config and "dhcp-snooping vlan" in running_config:
+        security_audit["dhcp_snooping_aruba"] = {"status": True, "level": "good",
+                                                 "details": "DHCP Snooping semble activé globalement et pour des VLANs."}
+    elif "dhcp-snooping" in running_config:  # Partiellement configuré
+        security_audit["dhcp_snooping_aruba"] = {"status": "Partiel", "level": "warning",
+                                                 "details": "DHCP Snooping partiellement configuré. Vérifier l'activation globale ET par VLAN."}
+    else:
+        security_audit["dhcp_snooping_aruba"] = {"status": False, "level": "bad",
+                                                 "details": "DHCP Snooping non activé. Requis pour prévenir les serveurs DHCP pirates."}
+
+    # Port Security (MAC Authentication / dot1x) déjà couvert par 'aaa_port_access_configured'
+    # Storm control (appelé 'rate-limit' dans OS-CX pour broadcast/multicast/unknown-unicast)
+    if "rate-limit " in running_config and (
+            "broadcast " in running_config or "multicast " in running_config or "unknown-unicast " in running_config):
+        security_audit["rate_limiting_bcast_mcast"] = {"status": True, "level": "good",
+                                                       "details": "Limitation de débit (storm control) pour broadcast/multicast/unknown-unicast semble configurée."}
+    else:
+        security_audit["rate_limiting_bcast_mcast"] = {"status": False, "level": "warning",
+                                                       "details": "Limitation de débit (storm control) non détectée. Utile contre les tempêtes de trafic."}
+
     return security_audit
 
 
