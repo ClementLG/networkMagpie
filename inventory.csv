@@ -1,0 +1,3 @@
+device,group,software
+10.3.3.163,group1,cisco_iosxe
+10.3.3.165,group2,aruba_os-cx
