@@ -22,13 +22,17 @@ import csv
 import os
 import datetime
 import re
+import logging
+import traceback
 from netmiko import ConnectHandler
 from netmiko.exceptions import NetmikoTimeoutException, NetmikoAuthenticationException, SSHException
 from textfsm.parser import TextFSMError
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
-import traceback
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 # --- Excel Constants and Helper Functions ---
 GREEN_FILL = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
@@ -126,7 +130,7 @@ def get_aruba_device_info(net_connect):
         if info['model'] == 'N/A' or info['serial_number'] == 'N/A' or info['uptime'] == 'N/A':
             if not raw_sys_data:  # Retrieve raw output if not already done
                 raw_sys_data = net_connect.send_command("show system", use_textfsm=False, expect_string=r"#")
-            # print(f"DEBUG: Host {net_connect.host} - raw 'show system' (for fallback info): \n{raw_sys_data}\n--------------------")
+            # logger.debug(f"DEBUG: Host {net_connect.host} - raw 'show system' (for fallback info): \n{raw_sys_data}\n--------------------")
 
             if info['model'] == 'N/A':
                 match_model_sys = re.search(r"Product Name\s*:\s*([^\r\n]+)", raw_sys_data, re.IGNORECASE)
@@ -155,7 +159,7 @@ def get_aruba_device_info(net_connect):
             else:
                 raise ValueError("TextFSM for 'show version' did not return valid data.")
         except (TextFSMError, ValueError, IndexError) as e:
-            # print(f"  [WARNING] TextFSM/Parsing 'show version' on {net_connect.host} failed: {e}. Raw mode.") # Logged by console
+            logger.debug(f"TextFSM/Parsing 'show version' on {net_connect.host} failed: {e}. Raw mode.")
             raw_ver_data = net_connect.send_command("show version", use_textfsm=False, expect_string=r"#")
             if info['hostname'] == 'N/A':
                 match_hostname_ver = re.search(r"Hostname\s*:\s*(\S+)", raw_ver_data, re.IGNORECASE)
@@ -172,7 +176,7 @@ def get_aruba_device_info(net_connect):
 
         return info
     except Exception as e:
-        print(f"  Critical error get_aruba_device_info: {e}")
+        logger.critical(f"Critical error get_aruba_device_info: {e}")
         traceback.print_exc()
         return info  # Return what has been collected so far
 
@@ -188,7 +192,9 @@ def get_aruba_interfaces(net_connect):
         list: A list of dictionaries, where each dictionary represents an interface.
     """
     interfaces = []
+    logger.info(f"Collecting interface information for {net_connect.host}...")
     try:
+        # 1. Get IP information
         ip_brief_textfsm_out = net_connect.send_command("show ip interface brief", use_textfsm=True, expect_string=r"#")
         ip_map = {}
         if isinstance(ip_brief_textfsm_out, list):
@@ -205,18 +211,20 @@ def get_aruba_interfaces(net_connect):
                         entry["ip"] = "unassigned"
                     ip_map[ifname] = entry
 
+        # 2. Get L2/Physical Status
         int_status_list = []
         try:
             int_status_out = net_connect.send_command("show interface status", use_textfsm=True, expect_string=r"#")
             if isinstance(int_status_out, list): int_status_list = int_status_out
         except TextFSMError:
-            pass
+            logger.debug("TextFSM parsing failed for 'show interface status', continuing without it.")
         except Exception as e:
-            print(f"  [ERROR] Command 'show interface status' {net_connect.host}: {e}.")
+            logger.error(f"Command 'show interface status' failed on {net_connect.host}: {e}.")
 
         status_l2_map = {item.get('port', item.get('interface')): item for item in int_status_list if
                          item.get('port', item.get('interface'))}
 
+        # 3. Get Descriptions from Config
         running_config_interfaces = net_connect.send_command("show running-config interfaces", read_timeout=120,
                                                              expect_string=r"#")
         desc_map = {}
@@ -230,8 +238,11 @@ def get_aruba_interfaces(net_connect):
             elif not line_strip or line_strip.startswith("!"):
                 current_if_desc = None
 
+        # 4. Main Interface Loop via 'show interface brief' (Raw Parse)
         show_int_brief_raw = net_connect.send_command("show interface brief", use_textfsm=False, expect_string=r"#")
 
+        # Regex to parse 'show interface brief'
+        # Handles various column layouts loosely
         int_brief_re = re.compile(
             r"^(?P<interface>\S+)\s+"
             r"(?P<native_vlan>\S+)\s+"
@@ -239,17 +250,7 @@ def get_aruba_interfaces(net_connect):
             r"(?P<type_col>\S+)\s+"
             r"(?P<enabled>yes|no)\s+"
             r"(?P<link_status_l2>\S+)\s+"
-            r"(?P<reason>.*?)\s{2,}"
-            r"(?P<speed>\S+)\s+"
-            r"(?P<description>.*)$"
-        )
-        int_brief_re_short = re.compile(
-            r"^(?P<interface>\S+)\s+"
-            r"(?P<native_vlan>\S+)\s+"
-            r"(?P<mode>\S+)\s+"
-            r"(?P<type_col>\S+)\s+"
-            r"(?P<enabled>yes|no)\s+"
-            r"(?P<link_status_l2>\S+)\s+"
+            r"(?:(?P<reason>.*?)\s{2,})?" 
             r"(?P<speed>\S+)\s+"
             r"(?P<description>.*)$"
         )
@@ -261,6 +262,7 @@ def get_aruba_interfaces(net_connect):
         for line in show_int_brief_raw.splitlines():
             line_s = line.strip()
             if not line_s: continue
+            # Skip headers
             if line_s.lower().startswith("port ") or \
                     line_s.lower().startswith("native") or \
                     line_s.lower().startswith("-----"):
@@ -269,8 +271,7 @@ def get_aruba_interfaces(net_connect):
             if not header_skipped_brief: continue
 
             match = int_brief_re.match(line_s)
-            if not match: match = int_brief_re_short.match(line_s)
-
+            
             if match:
                 interfaces_from_regex_count += 1
                 data = match.groupdict()
@@ -285,7 +286,7 @@ def get_aruba_interfaces(net_connect):
 
                 admin_enabled = data.get('enabled', 'no').lower()
                 link_s_l2 = data.get('link_status_l2', 'N/A').lower()
-                reason = data.get('reason', '').strip().lower()
+                reason = data.get('reason', '').strip().lower() if data.get('reason') else ""
 
                 final_link_status = link_s_l2
                 if admin_enabled == 'no':
@@ -310,7 +311,7 @@ def get_aruba_interfaces(net_connect):
                         final_proto_status = "down"
 
                 intf_type_parsed = "Management" if name.lower() == "mgmt" else \
-                    "Virtual" if name.lower().startswith(("vlan", "loopback", "lag")) else \
+                    "Virtual" if name.lower().startswith(("vlan", "loopback", "lag", "tunnel")) else \
                         "Physical"
 
                 vlan_info = status_l2_detail.get('vlan', 'N/A')
@@ -333,8 +334,7 @@ def get_aruba_interfaces(net_connect):
         if "mgmt" not in processed_interfaces_in_brief:
             try:
                 mgmt_raw = net_connect.send_command("show interface mgmt", use_textfsm=False, expect_string=r"#")
-                # print(f"DEBUG: Host {net_connect.host} - raw 'show interface mgmt':\n{mgmt_raw}\n--------------------")
-
+                
                 mgmt_ip, mgmt_link, mgmt_admin, mgmt_proto = "N/A", "N/A", "N/A", "N/A"
 
                 match_ip = re.search(r"IPv4 address/subnet-mask\s*:\s*(\S+)", mgmt_raw, re.IGNORECASE)
@@ -363,23 +363,21 @@ def get_aruba_interfaces(net_connect):
                 mgmt_proto_from_map = ip_map.get("mgmt", {}).get("protocol_l3", mgmt_proto)
                 if mgmt_proto_from_map != 'N/A': mgmt_proto = mgmt_proto_from_map
 
-                if mgmt_link != "N/A":  # If we could read something from 'show interface mgmt'
+                if mgmt_link != "N/A":  
                     interfaces.append({
                         "name": "mgmt", "ip_address": mgmt_ip_from_map,
                         "status_link": final_mgmt_link_status, "status_protocol": mgmt_proto,
                         "description": desc_map.get("mgmt", "Management Interface"), "type": "Management",
-                        "vlan": "N/A", "duplex": "N/A", "speed": "N/A",  # Non dispo facilement via cette commande
+                        "vlan": "N/A", "duplex": "N/A", "speed": "N/A",
                     })
-                    interfaces_from_regex_count += 1  # Compter l'interface mgmt
+                    interfaces_from_regex_count += 1
             except Exception as e_mgmt:
-                print(
-                    f"  [WARNING] Error recovering 'show interface mgmt' on {net_connect.host}: {e_mgmt}")
+                logger.warning(f"Error recovering 'show interface mgmt' on {net_connect.host}: {e_mgmt}")
 
-        print(
-            f"  [INFO] Interface parsing processed/found {interfaces_from_regex_count} entries for {net_connect.host}.")
+        logger.info(f"Interface parsing processed/found {interfaces_from_regex_count} entries for {net_connect.host}.")
         return interfaces
     except Exception as e:
-        print(f"  Critical error in get_aruba_interfaces for {net_connect.host}: {e}");
+        logger.critical(f"Critical error in get_aruba_interfaces for {net_connect.host}: {e}")
         traceback.print_exc()
         return []
 
@@ -400,9 +398,9 @@ def get_vlans(net_connect):
         try:
             vlan_out_textfsm = net_connect.send_command("show vlan", use_textfsm=True, expect_string=r"#")
         except TextFSMError:
-            pass
+            logger.debug(f"TextFSM failed for 'show vlan' on {net_connect.host}, continuing with regex.")
         except Exception as e:
-            print(f"  [ERROR] Command 'show vlan' (TextFSM) failed on {net_connect.host}: {e}.")
+            logger.error(f"Command 'show vlan' (TextFSM) failed on {net_connect.host}: {e}.")
 
         vlan_data_textfsm = vlan_out_textfsm if isinstance(vlan_out_textfsm, list) else []
 
@@ -435,7 +433,7 @@ def get_vlans(net_connect):
                     vlans_list.append({"id": vid, "name": vname_clean, "status": vstatus, "ports": vports_clean})
         return vlans_list
     except Exception as e:
-        print(f"  Critical error in get_vlans for {net_connect.host}: {e}");
+        logger.critical(f"Critical error in get_vlans for {net_connect.host}: {e}")
         traceback.print_exc()
         return []
 
@@ -456,9 +454,9 @@ def get_arp_table(net_connect):
         try:
             arp_out_textfsm = net_connect.send_command("show arp", use_textfsm=True, expect_string=r"#")
         except TextFSMError:
-            pass
+            logger.debug(f"TextFSM failed for 'show arp' on {net_connect.host}, continuing with regex.")
         except Exception as e:
-            print(f"  [ERROR] Command 'show arp' (TextFSM) failed on {net_connect.host}: {e}.")
+            logger.error(f"Command 'show arp' (TextFSM) failed on {net_connect.host}: {e}.")
 
         arp_data_textfsm = arp_out_textfsm if isinstance(arp_out_textfsm, list) else []
 
@@ -498,7 +496,7 @@ def get_arp_table(net_connect):
                     })
         return arp_table
     except Exception as e:
-        print(f"  Critical error in get_arp_table for {net_connect.host}: {e}");
+        logger.critical(f"Critical error in get_arp_table for {net_connect.host}: {e}")
         traceback.print_exc()
         return []
 
@@ -515,88 +513,93 @@ def check_security_features(net_connect, running_config):
         dict: A dictionary containing the results of various security checks.
     """
     security_audit = {}
-    virtual_prefixes = ("vlan", "loopback", "lag")  # Used for unused ports check
+    logger.info(f"Starting security audit for {net_connect.host}...")
 
     # --- I. AAA & Authentication & Management Access ---
+    # 1. AAA Port Access (Edge Security)
     if "aaa authentication port-access" in running_config:
         security_audit["aaa_port_access_configured"] = {"status": True, "level": "good",
-                                                        "details": "AAA for port access (dot1x/mac-auth) seems configured. Check configuration details."}
+                                                        "details": "AAA for port access (dot1x/mac-auth) seems configured."}
     else:
         security_audit["aaa_port_access_configured"] = {"status": False, "level": "warning",
                                                         "details": "AAA for port access (dot1x/mac-auth) not detected. Recommended to secure network access."}
 
-    local_user_passwords_encrypted = True  # Default to True
+    # 2. AAA Login (Management Security) - CRITICAL MISSING CHECK ADDED
+    if "aaa authentication login" in running_config:
+        if "group tacacs" in running_config or "group radius" in running_config:
+            security_audit["aaa_login_configured"] = {"status": "Centralized (TACACS+/RADIUS)", "level": "good",
+                                                      "details": "AAA login authentication uses centralized server."}
+        else:
+            security_audit["aaa_login_configured"] = {"status": "Local/Other", "level": "warning",
+                                                      "details": "AAA login configured but might be local only. Verify 'aaa authentication login' config."}
+    else:
+        security_audit["aaa_login_configured"] = {"status": "Not Configured", "level": "bad",
+                                                  "details": "No 'aaa authentication login' found. Default local auth used?"}
+
+    # 3. Local User Password Type
+    local_user_passwords_encrypted = True
+    # Check for plaintext passwords explicitly
     if re.search(r"user\s+\S+\s+password\s+plaintext", running_config):
         local_user_passwords_encrypted = False
 
-    if local_user_passwords_encrypted and "password" in running_config:  # If 'password' is found but not 'plaintext'
+    if local_user_passwords_encrypted and "password" in running_config:
         security_audit["local_user_password_encryption"] = {"status": "Encrypted (hashed)", "level": "good",
                                                             "details": "Local user passwords seem to be stored encrypted (hashed)."}
     elif not local_user_passwords_encrypted:
         security_audit["local_user_password_encryption"] = {"status": "Plaintext detected", "level": "bad",
-                                                            "details": "At least one local user password is stored in plaintext. Use 'password ciphertext <hash>' or 'password sha256 <hash>'."}
+                                                            "details": "At least one local user password is stored in plaintext. Use 'password ciphertext <hash>'."}
     else:
+        # Case where no "password" keyword found or ambiguous
         security_audit["local_user_password_encryption"] = {
-            "status": "No local user with password found or unknown format", "level": "warning",
-            "details": "Manually check local user password storage."}
-
+            "status": "No local user with password found", "level": "warning",
+            "details": "Manually check local user configuration."}
 
     # Password complexity policy
     min_len_str, complexity_str = "Not configured", "Not configured"
     min_len_level, complexity_level = "bad", "bad"
 
-    if "password minimum-length" in running_config:
-        match_pass_len = re.search(r"password minimum-length\s+(\d+)", running_config)
-        min_len = int(match_pass_len.group(1)) if match_pass_len else 0
+    match_pass_len = re.search(r"password minimum-length\s+(\d+)", running_config)
+    if match_pass_len:
+        min_len = int(match_pass_len.group(1))
         min_len_str = f"Min length: {min_len}"
         min_len_level = "good" if min_len >= 12 else "warning" if min_len >= 8 else "bad"
+    
     security_audit["password_min_length"] = {"status": min_len_str, "level": min_len_level,
                                              "details": f"{min_len_str}. Recommended: >=12."}
 
-    # For complexity, OS-CX has 'password complexity [level]' or 'password-policy <name>' -> 'character-class-check'
     if "password complexity" in running_config or "character-class-check" in running_config:
         complexity_str = "Enabled (check details)"
         complexity_level = "good"
     security_audit["password_complexity"] = {"status": complexity_str, "level": complexity_level,
-                                             "details": f"Password complexity policy: {complexity_str}. Check specific requirements."}
-
-    # Enable password (equivalent to 'enable secret' on Cisco)
-    if "enable password" in running_config:  # OS-CX can use 'enable password [ciphertext|plaintext] ...'
-        if "plaintext" in running_config.split("enable password")[1].splitlines()[0]:
-            security_audit["enable_password_aruba"] = {"status": "Plaintext", "level": "bad",
-                                                       "details": "The 'enable' password is stored in plaintext. Use an encrypted version."}
-        else:
-            security_audit["enable_password_aruba"] = {"status": "Encrypted", "level": "good",
-                                                       "details": "The 'enable' password is stored encrypted."}
-    else:
-        security_audit["enable_password_aruba"] = {"status": "Not configured", "level": "bad",
-                                                   "details": "No 'enable' password configured."}
+                                             "details": f"Password complexity policy: {complexity_str}."}
 
     # --- II. Access Line Security (Console) ---
-    # OS-CX uses 'line console' then parameters below
     console_config_text = ""
     console_match = re.search(r"line console\s*\n(.*?)(?=line|interface|vlan|router|exit|$)", running_config,
                               re.DOTALL | re.MULTILINE)
     if console_match:
         console_config_text = console_match.group(1)
 
-    if "password " in console_config_text or "login local" in console_config_text or "login group" in console_config_text:
+    if console_config_text and ("password " in console_config_text or "login " in console_config_text or "aaa authentication login" in running_config):
+         # Logic assumption: if global AAA login is set, console might use it imply default. 
+         # But safer to look for specific line config or inheritance.
+         # For Audit purposes, if "login" is there it's usually good.
         security_audit["console_auth"] = {"status": True, "level": "good",
                                           "details": "Console line protected by login method."}
     else:
         security_audit["console_auth"] = {"status": False, "level": "bad",
-                                          "details": "Console line not protected by password."}
+                                          "details": "Console line authentication not explicitly seen in 'line console'."}
 
-    exec_timeout_con_match = re.search(r"session-timeout\s+(\d+)", console_config_text)  # OS-CX uses session-timeout
+    exec_timeout_con_match = re.search(r"session-timeout\s+(\d+)", console_config_text)
     if exec_timeout_con_match:
         minutes_con = int(exec_timeout_con_match.group(1))
-        if minutes_con > 0 and minutes_con <= 15:  # Reasonable timeout
+        if 0 < minutes_con <= 15:
             security_audit["console_session_timeout"] = {"status": f"{minutes_con} minutes", "level": "good",
                                                          "details": "Session timeout configured on console."}
         elif minutes_con == 0:
             security_audit["console_session_timeout"] = {"status": "Disabled (0)", "level": "bad",
                                                          "details": "Console session timeout disabled. Risk."}
-        else:  # Too long
+        else:
             security_audit["console_session_timeout"] = {"status": f"{minutes_con} minutes", "level": "warning",
                                                          "details": "Console session timeout high. Recommended: 5-15 min."}
     else:
@@ -606,223 +609,141 @@ def check_security_features(net_connect, running_config):
     # --- III. Management Services Security ---
     # SSH
     try:
-
-        # Use "show ssh server all-vrfs" for a complete view
         ssh_status_raw = net_connect.send_command("show ssh server all-vrfs", expect_string=r"#")
-
-        ssh_server_is_enabled = False  # Determined by output presence
-        ssh_v2_is_primary = False
-        ssh_v1_is_active = True  # Assume active by default if not explicitly disabled
-
+        
+        ssh_enabled = False
+        ssh_v1 = False
+        
         if "SSH server configuration on VRF" in ssh_status_raw:
-            ssh_server_is_enabled = True
+            ssh_enabled = True # Server is running
+        
+        # Check specific version disablement in config
+        # "no ssh server v1 enable" -> Good
+        # "ssh server v1 enable" -> Bad
+        
+        if "ssh server v1 enable" in running_config:
+            ssh_v1 = True
+        elif "no ssh server v1 enable" in running_config:
+            ssh_v1 = False
+        else:
+            # Default behavior of OS-CX? Old versions enabled, newer disabled. 
+            # We mark as warning if not explicitly disabled.
+            ssh_v1 = "Unknown (Implicit)"
 
-        # Search for global or VRF SSH version
-        match_ssh_version = re.search(r"SSH Version\s*:\s*([\d\.]+)", ssh_status_raw)
-        if match_ssh_version and match_ssh_version.group(1) == "2.0":
-            ssh_v2_is_primary = True
+        if ssh_enabled:
+            if ssh_v1 is True:
+                 security_audit["ssh_status"] = {"status": "SSHv1 Enabled", "level": "bad", "details": "SSHv1 explicitly enabled. Disable it."}
+            elif ssh_v1 is False:
+                 security_audit["ssh_status"] = {"status": "SSHv2 Only", "level": "good", "details": "SSHv2 enabled, v1 disabled."}
+            else:
+                 security_audit["ssh_status"] = {"status": "SSH Enabled (v1 implicit)", "level": "warning", "details": "Verify if SSHv1 is disabled by default or add 'no ssh server v1 enable'."}
+        else:
+             # Weird if we are connected via SSH...
+             security_audit["ssh_status"] = {"status": "Disabled?", "level": "warning", "details": "SSH server appears disabled in 'show ssh', yet we are connected?"}
 
-        # On OS-CX, SSHv1 is disabled if 'no ssh server v1 enable' is in config
-        # or if 'show ssh server (all-vrfs)' explicitly indicates v1 is not used.
+    except Exception as e:
+        logger.error(f"SSH check failed: {e}")
+        security_audit["ssh_status"] = {"status": "Error", "level": "error", "details": "Failed to check SSH status."}
 
-        # Aruba OS-CX tends to be v2 by default and v1 must be explicitly enabled (or disabled).
-        # If 'no ssh server v1 enable' is in config, it's proof of disabling.
-
-        v1_disabled_by_config = "no ssh server v1 enable" in running_config
-        v1_explicitly_enabled_in_config = "ssh server v1 enable" in running_config  # Less likely
-
-        if not ssh_server_is_enabled and "ssh" in str(net_connect.device_type).lower():
-            # This case is if 'show ssh server all-vrfs' returns nothing conclusive
-            # but we are connected via SSH.
-            security_audit["ssh_status"] = {"status": "Enabled (SSH connection active)", "level": "warning",
-                                            "details": "SSH server functional, but version/v1 details via 'show ssh server all-vrfs' unclear. Check manually."}
-        elif ssh_v2_is_primary and (v1_disabled_by_config or not v1_explicitly_enabled_in_config):
-            # If reported version is 2.0 and v1 is not explicitly enabled in config
-            # (or better, explicitly disabled), we consider it good.
-            security_audit["ssh_status"] = {"status": "SSHv2 Only (probable)", "level": "good",
-                                            "details": "SSH server enabled, version 2.0 detected. SSHv1 seems disabled."}
-        elif ssh_v2_is_primary and v1_explicitly_enabled_in_config:
-            security_audit["ssh_status"] = {"status": "SSHv2 with SSHv1 enabled", "level": "bad",
-                                            "details": "SSHv2 used, but SSHv1 explicitly enabled in config. Disable SSHv1."}
-        else:  # Case where SSH is active but unsure about v1, and v2 is not clearly the only one.
-            security_audit["ssh_status"] = {"status": "SSH Enabled (v1 status uncertain)", "level": "warning",
-                                            "details": "SSH server enabled, but unable to confirm SSHv1 disabled. Ensure 'no ssh server v1 enable'."}
-
-    except Exception as e_ssh:
-        print(f"  Error during SSH check for {net_connect.host}: {e_ssh}")
-        security_audit["ssh_status"] = {"status": "Enabled (SSH connection active)", "level": "warning",
-                                        "details": "SSH server functional (connection established), but 'show ssh server all-vrfs' failed. Version and SSHv1 status unknown."}
-
-    # Telnet (OS-CX: 'telnet-server enable' or 'no telnet-server enable')
-    if "no telnet-server enable" in running_config or "telnet-server" not in running_config:  # Disabled by default or explicitly
-        security_audit["telnet_server"] = {"status": "Disabled", "level": "good",
-                                           "details": "Telnet server disabled."}
+    # Telnet
+    if "no telnet-server enable" in running_config:
+        security_audit["telnet_server"] = {"status": "Disabled", "level": "good", "details": "Telnet server disabled."}
     elif "telnet-server enable" in running_config:
-        security_audit["telnet_server"] = {"status": "Enabled", "level": "bad",
-                                           "details": "Telnet server enabled. Unencrypted protocol, disable it."}
-    else:  # Ambiguous case
-        security_audit["telnet_server"] = {"status": "Status uncertain (not explicitly enabled/disabled)",
-                                           "level": "warning",
-                                           "details": "Manually check Telnet server status."}
-
-    # HTTP/HTTPS servers
-    https_enabled_in_config = False
-    if "https-server" in running_config:
-        https_block_match = re.search(r"https-server\s*\n(.*?)(?=^\S|\Z)", running_config, re.DOTALL | re.MULTILINE)
-        if https_block_match and "enable" in https_block_match.group(1):
-            https_enabled_in_config = True
-
-    if https_enabled_in_config:
-        security_audit["https_server"] = {"status": "Enabled", "level": "good",
-                                          "details": "HTTPS server (web management) enabled."}
+        security_audit["telnet_server"] = {"status": "Enabled", "level": "bad", "details": "Telnet server enabled. Disable it."}
     else:
-        security_audit["https_server"] = {"status": "Disabled or Not Found", "level": "good",
-                                          "details": "HTTPS server not detected as enabled."}
-
-    http_enabled_in_config = False
-    if "http-server" in running_config:  # OS-CX rarely has http-server if https is present
-        http_block_match = re.search(r"http-server\s*\n(.*?)(?=^\S|\Z)", running_config, re.DOTALL | re.MULTILINE)
-        if http_block_match and "enable" in http_block_match.group(1):
-            http_enabled_in_config = True
-
-    if http_enabled_in_config:
-        security_audit["http_server"] = {"status": "Enabled", "level": "bad",
-                                         "details": "HTTP server (insecure) enabled. Disable it."}
+        # Default is usually disabled on modern AOS-CX, but good verify.
+        security_audit["telnet_server"] = {"status": "Default", "level": "warning", "details": "Explicit 'no telnet-server enable' recommended."}
+        
+    # TFTP - New Check
+    if "tftp-server enable" in running_config:
+        security_audit["tftp_server"] = {"status": "Enabled", "level": "bad", "details": "TFTP server enabled. Insecure."}
     else:
-        security_audit["http_server"] = {"status": "Disabled or Not Found", "level": "good",
-                                         "details": "HTTP server not detected as enabled."}
+        security_audit["tftp_server"] = {"status": "Disabled", "level": "good", "details": "TFTP server not enabled."}
+
+    # HTTP/HTTPS
+    https_enabled = "https-server enable" in running_config or "https-server vrf" in running_config
+    http_enabled = "http-server enable" in running_config or "http-server vrf" in running_config
+    
+    if https_enabled:
+        security_audit["https_server"] = {"status": "Enabled", "level": "good", "details": "HTTPS server (web-mgmt) enabled."}
+    else:
+        security_audit["https_server"] = {"status": "Disabled", "level": "good", "details": "HTTPS server disabled."}
+        
+    if http_enabled:
+        security_audit["http_server"] = {"status": "Enabled", "level": "bad", "details": "HTTP server enabled. Insecure."}
+    else:
+         security_audit["http_server"] = {"status": "Disabled", "level": "good", "details": "HTTP server disabled."}
 
     # Banners
     banners_set = []
     if "banner motd" in running_config: banners_set.append("MOTD")
-    if "banner exec" in running_config: banners_set.append("Exec")  # Less common on OS-CX
-    if "banner login" in running_config: banners_set.append("Login")  # Less common on OS-CX
+    if "banner exec" in running_config: banners_set.append("Exec")
+    
     if banners_set:
-        security_audit["banners_configured"] = {"status": f"Configured: {', '.join(banners_set)}", "level": "good",
-                                                "details": "Warning banners configured."}
+        security_audit["banners_configured"] = {"status": f"Configured: {', '.join(banners_set)}", "level": "good", "details": "Warning banners configured."}
     else:
-        security_audit["banners_configured"] = {"status": "None", "level": "warning",
-                                                "details": "No warning banners configured. Recommended for legal reasons."}
+        security_audit["banners_configured"] = {"status": "None", "level": "warning", "details": "No warning banners configured."}
 
-    # --- IV. General Hardening & Services ---
-    # Source Routing (often not an explicit command 'no ip source-route' on OS-CX, disabled by default)
-    security_audit["ip_source_route_aruba"] = {"status": "Likely Disabled (default)", "level": "good",
-                                               "details": "Source routing is generally disabled by default on OS-CX."}
+    # --- IV. General Hardening ---
+    # IP Source Route - Fixed Logic
+    # On many Aruba CX, "no ip source-route" might not be a command or might be default.
+    # We check if "ip source-route" IS present.
+    if "ip source-route" in running_config and "no ip source-route" not in running_config:
+         security_audit["ip_source_route"] = {"status": "Enabled", "level": "bad", "details": "IP Source Routing enabled."}
+    else:
+         security_audit["ip_source_route"] = {"status": "Disabled", "level": "good", "details": "IP Source Routing not found (disabled)."}
 
-    # LLDP/CDP (CDP is rare on Aruba, LLDP is standard)
-    if "no lldp enable" in running_config:  # If LLDP is explicitly disabled globally
-        security_audit["lldp_global_status"] = {"status": "Globally Disabled", "level": "good",
-                                                "details": "LLDP is globally disabled."}
-    elif "lldp enable" in running_config or "lldp" in running_config:  # Enabled by default or explicitly
-        security_audit["lldp_global_status"] = {"status": "Globally Enabled", "level": "warning",
-                                                "details": "LLDP is globally enabled. Filter on untrusted interfaces via 'no lldp tx-enable/rx-enable'."}
-    else:  # Neither, probably enabled by default
-        security_audit["lldp_global_status"] = {"status": "Potentially Enabled (default)", "level": "warning",
-                                                "details": "LLDP is likely enabled by default. Check configuration."}
+    # LLDP
+    if "no lldp enable" in running_config:
+        security_audit["lldp_global_status"] = {"status": "Globally Disabled", "level": "good", "details": "LLDP disabled."}
+    else:
+        security_audit["lldp_global_status"] = {"status": "Globally Enabled", "level": "warning", "details": "LLDP globally enabled. Secure untrusted ports."}
 
     # --- V. Logging & Monitoring ---
-    log_level_details = "N/A"
-    log_level_match = re.search(r"logging severity\s+(\S+)", running_config)
-    if log_level_match: log_level_details = f"Global severity: {log_level_match.group(1)}"
-
-    if "logging syslog host" in running_config or "logging host" in running_config:  # 'logging host <IP>' on OS-CX
-        security_audit["remote_logging_aruba"] = {"status": True, "level": "good",
-                                                  "details": f"Remote logging (syslog) configured. {log_level_details}"}
-        if "logging source-interface" in running_config and "loopback" in running_config:  # Good practice
-            src_int_match = re.search(r"logging source-interface\s+(\S+)", running_config)
-            security_audit["logging_source_int_aruba"] = {
-                "status": src_int_match.group(1) if src_int_match else "Configured", "level": "good",
-                "details": "Logging source interface specified (Loopback is good)."}
-        else:
-            security_audit["logging_source_int_aruba"] = {"status": False, "level": "warning",
-                                                          "details": "Logging source interface not specified or not a loopback."}
+    if "logging syslog host" in running_config or "logging host" in running_config:
+        security_audit["remote_logging"] = {"status": True, "level": "good", "details": "Remote logging (syslog) configured."}
     else:
-        security_audit["remote_logging_aruba"] = {"status": False, "level": "bad",
-                                                  "details": f"Remote logging (syslog) NOT configured. {log_level_details}"}
-        security_audit["logging_source_int_aruba"] = {"status": "N/A", "level": "bad",
-                                                      "details": "Syslog not configured."}
+        security_audit["remote_logging"] = {"status": False, "level": "bad", "details": "Remote logging (syslog) NOT configured."}
 
     # NTP
-    ntp_servers_aruba = [line for line in running_config.splitlines() if line.strip().startswith("ntp server")]
-    num_ntp_aruba = len(ntp_servers_aruba)
-    ntp_sync_level_aruba, ntp_sync_details_aruba, ntp_sync_status_aruba = "warning", "NTP sync status unknown.", "Error"
-    try:
-        ntp_status_aruba_raw = net_connect.send_command("show ntp status", expect_string=r"#")
-        if "Clock is synchronized" in ntp_status_aruba_raw:
-            stratum_match = re.search(r"stratum\s+(\d+)", ntp_status_aruba_raw)
-            ntp_sync_status_aruba, ntp_sync_details_aruba, ntp_sync_level_aruba = True, f"NTP synchronized. Stratum: {stratum_match.group(1) if stratum_match else 'N/A'}.", "good"
-        else:
-            ntp_sync_status_aruba, ntp_sync_details_aruba = False, "NTP not synchronized."
-            ntp_sync_level_aruba = "bad"  # Not synced is always bad
-    except:
-        ntp_sync_details_aruba = "Sync status unknown ('show ntp status' failed)."
-        ntp_sync_level_aruba = "warning" if num_ntp_aruba > 0 else "bad"
-    security_audit["ntp_synchronization_aruba"] = {"status": ntp_sync_status_aruba, "level": ntp_sync_level_aruba,
-                                                   "details": ntp_sync_details_aruba}
-
-    if num_ntp_aruba >= 2:
-        security_audit["ntp_redundancy_aruba"] = {"status": f"{num_ntp_aruba} servers", "level": "good",
-                                                  "details": "NTP redundancy OK."}
-    elif num_ntp_aruba == 1:
-        security_audit["ntp_redundancy_aruba"] = {"status": "1 server", "level": "warning",
-                                                  "details": "Only one NTP server. Recommended: >=2."}
+    ntp_lines = [line for line in running_config.splitlines() if line.strip().startswith("ntp server")]
+    if len(ntp_lines) >= 2:
+        security_audit["ntp_redundancy"] = {"status": f"{len(ntp_lines)} servers", "level": "good", "details": "NTP redundancy OK."}
+    elif len(ntp_lines) == 1:
+        security_audit["ntp_redundancy"] = {"status": "1 server", "level": "warning", "details": "Only one NTP server configured."}
     else:
-        security_audit["ntp_redundancy_aruba"] = {"status": "0 servers", "level": "bad",
-                                                  "details": "NTP not configured. Unreliable time."}
+        security_audit["ntp_redundancy"] = {"status": "None", "level": "bad", "details": "No NTP servers configured."}
+        
+    # NTP Auth (Extra)
+    if any(" key " in line for line in ntp_lines):
+         security_audit["ntp_auth"] = {"status": "Configured", "level": "good", "details": "NTP authentication seems used."}
+    else:
+         security_audit["ntp_auth"] = {"status": "Not Configured", "level": "warning", "details": "NTP authentication not detected."}
 
     # SNMP
     if "snmp-server community public" in running_config or "snmp-server community private" in running_config:
-        security_audit["snmp_default_communities_aruba"] = {"status": True, "level": "bad",
-                                                            "details": "Default SNMP communities (public/private) used. Major risk."}
+        security_audit["snmp_default_communities"] = {"status": "Found", "level": "bad", "details": "Default SNMP communities (public/private) present."}
+    else:
+        security_audit["snmp_default_communities"] = {"status": "Not Found", "level": "good", "details": "No default public/private communities found."}
+
+    snmpv3_configured = "snmp-server user" in running_config
+    if snmpv3_configured:
+        security_audit["snmp_version"] = {"status": "SNMPv3", "level": "good", "details": "SNMPv3 users configured."}
     elif "snmp-server community" in running_config:
-        security_audit["snmp_default_communities_aruba"] = {"status": False, "level": "good",
-                                                            "details": "Custom SNMP communities. Check associated ACLs."}
+        security_audit["snmp_version"] = {"status": "SNMPv1/v2c", "level": "warning", "details": "Only SNMPv1/v2c communities found. Prefer v3."}
     else:
-        security_audit["snmp_default_communities_aruba"] = {"status": "N/A", "level": "good",
-                                                            "details": "No SNMP v1/v2c communities configured."}
+        security_audit["snmp_version"] = {"status": "None", "level": "good", "details": "SNMP not configured."}
 
-    # SNMPv3 (OS-CX uses 'snmp-server vrf <vrf> user <user> auth ...')
-    snmpv3_user_found = "snmp-server user " in running_config or "snmp-server vrf " in running_config and " user " in running_config  # Simplified search
-
-    if snmpv3_user_found:
-        security_audit["snmp_v3_aruba"] = {"status": True, "level": "good",
-                                           "details": "SNMPv3 seems configured (users/groups detected)."}
-    elif "snmp-server community" in running_config:  # If no v3 but v1/v2c
-        security_audit["snmp_v3_aruba"] = {"status": "v1/v2c only", "level": "bad",
-                                           "details": "SNMPv1/v2c used (plaintext communities). Prefer SNMPv3."}
+    # --- VI. Layer 2 Security ---
+    if "bpdu-protection" in running_config:
+        security_audit["bpdu_protection"] = {"status": "Active", "level": "good", "details": "BPDU protection active globally or on ports."}
     else:
-        security_audit["snmp_v3_aruba"] = {"status": "N/A", "level": "good",
-                                           "details": "SNMP (v1/v2c/v3) does not seem configured."}
+        security_audit["bpdu_protection"] = {"status": "Inactive", "level": "warning", "details": "BPDU protection not found."}
 
-    # --- VI. Layer 2 Security (Indications) ---
-    # OS-CX: 'spanning-tree port <port> bpdu-protection'
-    if "bpdu-protection" in running_config:  # Global search
-        security_audit["bpdu_protection_aruba"] = {"status": True, "level": "good",
-                                                   "details": "BPDU Protection (Guard) seems configured on some interfaces."}
+    if "dhcp-snooping" in running_config:
+         security_audit["dhcp_snooping"] = {"status": "Active", "level": "good", "details": "DHCP Snooping configured."}
     else:
-        security_audit["bpdu_protection_aruba"] = {"status": False, "level": "warning",
-                                                   "details": "BPDU Protection not detected. Recommended on access ports."}
-
-    # OS-CX: 'dhcp-snooping enable' and 'dhcp-snooping vlan <vlan-id> enable'
-    if "dhcp-snooping enable" in running_config and "dhcp-snooping vlan" in running_config:
-        security_audit["dhcp_snooping_aruba"] = {"status": True, "level": "good",
-                                                 "details": "DHCP Snooping seems enabled globally and for VLANs."}
-    elif "dhcp-snooping" in running_config:  # Partially configured
-        security_audit["dhcp_snooping_aruba"] = {"status": "Partial", "level": "warning",
-                                                 "details": "DHCP Snooping partially configured. Check global activation AND per VLAN."}
-    else:
-        security_audit["dhcp_snooping_aruba"] = {"status": False, "level": "bad",
-                                                 "details": "DHCP Snooping not enabled. Required to prevent rogue DHCP servers."}
-
-    # Port Security (MAC Authentication / dot1x) already covered by 'aaa_port_access_configured'
-    # Storm control (called 'rate-limit' in OS-CX for broadcast/multicast/unknown-unicast)
-    if "rate-limit " in running_config and (
-            "broadcast " in running_config or "multicast " in running_config or "unknown-unicast " in running_config):
-        security_audit["rate_limiting_bcast_mcast"] = {"status": True, "level": "good",
-                                                       "details": "Rate limiting (storm control) for broadcast/multicast/unknown-unicast seems configured."}
-    else:
-        security_audit["rate_limiting_bcast_mcast"] = {"status": False, "level": "warning",
-                                                       "details": "Rate limiting (storm control) not detected. Useful against traffic storms."}
+         security_audit["dhcp_snooping"] = {"status": "Inactive", "level": "bad", "details": "DHCP Snooping not configured."}
 
     return security_audit
 
@@ -845,25 +766,25 @@ def load_inventory(filepath="inventory.csv"):
             try:
                 header = next(reader)
                 if len(header) < 3:
-                    print(
-                        f"Error: Inventory header '{filepath}' must have at least 3 columns (hostname, group, device_type).")
+                    logger.error(
+                        f"Inventory header '{filepath}' must have at least 3 columns (hostname, group, device_type).")
                     return None
             except StopIteration:
-                print(f"Warning: Inventory file '{filepath}' is empty.");
+                logger.warning(f"Inventory file '{filepath}' is empty.")
                 return []
             for row in reader:
                 if len(row) >= 3 and row[0].strip():
                     inventory.append(
                         {"host": row[0].strip(), "group": row[1].strip(), "device_type": row[2].strip().lower()})
                 elif row and any(field.strip() for field in row):
-                    print(f"Warning: Malformed inventory row: {row}")
+                    logger.warning(f"Malformed inventory row: {row}")
         return inventory
     except FileNotFoundError:
-        print(f"Error: Inventory file '{filepath}' not found.");
+        logger.error(f"Inventory file '{filepath}' not found.")
         return None
     except Exception as e:
-        print(f"Error reading '{filepath}': {e}");
-        traceback.print_exc();
+        logger.error(f"Error reading '{filepath}': {e}")
+        traceback.print_exc()
         return None
 
 
@@ -885,7 +806,7 @@ def load_passwords(filepath="passwords.csv"):
             try:
                 next(reader)
             except StopIteration:
-                print(f"Warning: Passwords file '{filepath}' is empty.");
+                logger.warning(f"Passwords file '{filepath}' is empty.")
                 return {}
             for row in reader:
                 if len(row) >= 3 and row[0].strip():
@@ -893,31 +814,33 @@ def load_passwords(filepath="passwords.csv"):
                     passwords[row[0].strip()] = {"username": row[1].strip(), "password": row[2].strip(),
                                                  "enable_password": enable_pass}
                 elif row and any(field.strip() for field in row):
-                    print(f"Warning: Malformed passwords row: {row}")
+                    logger.warning(f"Malformed passwords row: {row}")
         return passwords
     except FileNotFoundError:
-        print(f"Error: Passwords file '{filepath}' not found.");
+        logger.error(f"Passwords file '{filepath}' not found.")
         return None
     except Exception as e:
-        print(f"Error reading '{filepath}': {e}");
-        traceback.print_exc();
+        logger.error(f"Error reading '{filepath}': {e}")
+        traceback.print_exc()
         return None
 
 
 def generate_excel_report(all_data, excel_filepath):
     """
-    Generates a comprehensive Excel report from the collected audit data.
+    Generates a comprehensive Excel report from collected audit data.
 
     Args:
         all_data (list): A list of dictionaries containing audit data for all devices.
         excel_filepath (str): The file path where the Excel report will be saved.
     """
-    if not all_data: print(f"No data for Excel report: {excel_filepath}."); return
-    wb = openpyxl.Workbook();
+    if not all_data:
+        logger.warning(f"No data for Excel report: {excel_filepath}.")
+        return
+    wb = openpyxl.Workbook()
     wb.remove(wb.active)
     ws_info = wb.create_sheet("General Info")
     headers_info = ["Hostname", "IP Address", "Model", "OS Version", "Uptime", "Serial Number"]
-    ws_info.append(headers_info);
+    ws_info.append(headers_info)
     apply_header_style(ws_info)
     for dev_data in all_data:
         if dev_data.get('status') == 'error_connection':
@@ -934,7 +857,7 @@ def generate_excel_report(all_data, excel_filepath):
     ws_interfaces = wb.create_sheet("Interfaces")
     headers_interfaces = ["Hostname", "Interface Name", "Type", "Description", "IP Address", "Link Status",
                           "Protocol Status", "VLAN (Access)", "Duplex", "Speed"]
-    ws_interfaces.append(headers_interfaces);
+    ws_interfaces.append(headers_interfaces)
     apply_header_style(ws_interfaces)
     for dev_data in all_data:
         if dev_data.get('status') == 'error_connection': continue
@@ -960,7 +883,7 @@ def generate_excel_report(all_data, excel_filepath):
     auto_fit_columns(ws_interfaces)
     ws_vlans = wb.create_sheet("VLANs")
     headers_vlans = ["Hostname", "VLAN ID", "VLAN Name", "Status", "Assigned Ports"]
-    ws_vlans.append(headers_vlans);
+    ws_vlans.append(headers_vlans)
     apply_header_style(ws_vlans)
     for dev_data in all_data:
         if dev_data.get('status') == 'error_connection': continue
@@ -975,7 +898,7 @@ def generate_excel_report(all_data, excel_filepath):
     auto_fit_columns(ws_vlans)
     ws_arp = wb.create_sheet("ARP Table")
     headers_arp = ["Hostname", "Protocol", "IP Address", "Age (min)", "MAC Address", "Type", "Interface"]
-    ws_arp.append(headers_arp);
+    ws_arp.append(headers_arp)
     apply_header_style(ws_arp)
     for dev_data in all_data:
         if dev_data.get('status') == 'error_connection': continue
@@ -987,7 +910,7 @@ def generate_excel_report(all_data, excel_filepath):
     auto_fit_columns(ws_arp)
     ws_security = wb.create_sheet("Security Audit")
     headers_security = ["Hostname", "Check Point", "Status/Value", "Level", "Details/Recommendation"]
-    ws_security.append(headers_security);
+    ws_security.append(headers_security)
     apply_header_style(ws_security)
     for dev_data in all_data:
         if dev_data.get('status') == 'error_connection': continue
@@ -1000,10 +923,10 @@ def generate_excel_report(all_data, excel_filepath):
             set_cell_status_color(lc, check_data.get("level"))
     auto_fit_columns(ws_security)
     try:
-        wb.save(excel_filepath);
-        print(f"\n[+] Aruba Excel report generated: {excel_filepath}")
+        wb.save(excel_filepath)
+        logger.info(f"[+] Aruba Excel report generated: {excel_filepath}")
     except Exception as e:
-        print(f"\n[-] Error saving Aruba Excel report: {e}")
+        logger.error(f"[-] Error saving Aruba Excel report: {e}")
 
 
 def perform_aruba_audit(aruba_devices_inventory, global_passwords_map, output_directory):
@@ -1020,10 +943,10 @@ def perform_aruba_audit(aruba_devices_inventory, global_passwords_map, output_di
     for device_entry in aruba_devices_inventory:
         host, group = device_entry["host"], device_entry["group"]
         creds = global_passwords_map.get(group)
-        print(f"\n[INFO Aruba] Processing {host} (group: {group})...")
+        logger.info(f"Processing {host} (group: {group})...")
 
         if not creds:
-            print(f"  [ERROR Aruba] Credentials not found for group '{group}'. {host} ignored.")
+            logger.error(f"Credentials not found for group '{group}'. {host} ignored.")
             all_devices_data.append({"attempted_host": host, "status": "error_connection",
                                      "error_message": f"Credentials not found for group {group}"})
             continue
@@ -1041,7 +964,7 @@ def perform_aruba_audit(aruba_devices_inventory, global_passwords_map, output_di
                 actual_prompt = (
                     net_connect.base_prompt[:-1] if net_connect.base_prompt and net_connect.base_prompt.endswith(
                         ('#', '>')) else actual_host)
-                print(f"  [OK Aruba] Connected to {actual_host} ({actual_prompt}).")
+                logger.info(f"Connected to {actual_host} ({actual_prompt}).")
 
                 current_device_data["general_info"] = get_aruba_device_info(net_connect)
                 current_device_data["general_info"]["ip_address_queried"] = host
@@ -1056,20 +979,20 @@ def perform_aruba_audit(aruba_devices_inventory, global_passwords_map, output_di
                 all_devices_data.append(current_device_data)
 
         except (NetmikoTimeoutException, SSHException) as e:
-            print(f"  [ERROR Aruba] Connection to {host} (Timeout/SSH): {e}")
+            logger.error(f"Connection to {host} (Timeout/SSH): {e}")
             all_devices_data.append({"attempted_host": host, "status": "error_connection", "error_message": str(e)})
         except NetmikoAuthenticationException as e:
-            print(f"  [ERROR Aruba] Authentication on {host}: {e}")
+            logger.error(f"Authentication on {host}: {e}")
             all_devices_data.append(
                 {"attempted_host": host, "status": "error_connection", "error_message": f"Authentication failed: {e}"})
         except Exception as e:
             if "Unsupported 'device_type'" in str(e):
-                print(
-                    f"  [ERROR Aruba] Unsupported 'device_type' for {host}: {e}. Check 'device_type' ('aruba_aoscx_ssh') or Netmiko version.")
+                logger.error(
+                    f"Unsupported 'device_type' for {host}: {e}. Check 'device_type' ('aruba_aoscx_ssh') or Netmiko version.")
                 all_devices_data.append({"attempted_host": host, "status": "error_connection",
                                          "error_message": f"Unsupported 'device_type': {e}"})
             else:
-                print(f"  [ERROR Aruba] Unexpected error with {host}: {e}");
+                logger.error(f"Unexpected error with {host}: {e}")
                 traceback.print_exc()
                 all_devices_data.append(
                     {"attempted_host": host, "status": "error_connection", "error_message": f"Unexpected error: {e}"})
@@ -1079,14 +1002,14 @@ def perform_aruba_audit(aruba_devices_inventory, global_passwords_map, output_di
     try:
         with open(json_filename, 'w', encoding='utf-8') as f:
             json.dump(all_devices_data, f, indent=4, ensure_ascii=False)
-        print(f"\n[+] Aruba JSON data saved: {json_filename}")
+        logger.info(f"[+] Aruba JSON data saved: {json_filename}")
     except Exception as e:
-        print(f"\n[-] Error saving Aruba JSON data: {e}")
+        logger.error(f"[-] Error saving Aruba JSON data: {e}")
 
     excel_report_path = os.path.join(output_directory, f"audit_aruba_report_{timestamp}.xlsx")
     generate_excel_report(all_devices_data, excel_report_path)
 
-    print(f"\n[+] Aruba audit completed for {len(aruba_devices_inventory)} device(s).")
+    logger.info(f"Aruba audit completed for {len(aruba_devices_inventory)} device(s).")
 
 
 def main_aruba():
@@ -1094,25 +1017,28 @@ def main_aruba():
     Main entry point for standalone execution of the Aruba audit script.
     Loads inventory, credentials, filter for Aruba devices, and starts the audit.
     """
+    # Basic logging setup for standalone run
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
     inventory_file, password_file, output_directory = "inventory.csv", "passwords.csv", "audit_reports"
     if not os.path.exists(output_directory):
         try:
             os.makedirs(output_directory)
         except OSError as e:
-            print(f"Error creating directory '{output_directory}': {e}");
+            logger.error(f"Error creating directory '{output_directory}': {e}")
             return
 
     full_inventory = load_inventory(inventory_file)
     passwords_map = load_passwords(password_file)
 
     if full_inventory is None or passwords_map is None:
-        print("Stop (Aruba): Critical errors loading input files.");
+        logger.error("Stop (Aruba): Critical errors loading input files.")
         return
 
     aruba_devices = [device for device in full_inventory if device.get("device_type") == "aruba_os-cx"]
 
     if not aruba_devices:
-        print("No Aruba OS-CX devices found in inventory for standalone audit.")
+        logger.warning("No Aruba OS-CX devices found in inventory for standalone audit.")
         return
 
     perform_aruba_audit(aruba_devices, passwords_map, output_directory)

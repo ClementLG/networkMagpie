@@ -28,6 +28,12 @@ from aruba_audit import perform_aruba_audit, load_inventory as load_inventory_ar
     load_passwords as load_passwords_aruba, generate_excel_report as generate_excel_aruba
 
 
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 def main():
     """
     Main entry point for the network audit script.
@@ -45,7 +51,7 @@ def main():
         try:
             os.makedirs(session_output_directory)
         except OSError as e:
-            print(f"Error: Unable to create output directory '{session_output_directory}': {e}")
+            logger.error(f"Error: Unable to create output directory '{session_output_directory}': {e}")
             return
 
 
@@ -54,11 +60,11 @@ def main():
     passwords_map = load_passwords_cisco(password_file)
 
     if full_inventory is None or passwords_map is None:
-        print("Critical error loading inventory or password files. Aborting.")
+        logger.critical("Critical error loading inventory or password files. Aborting.")
         return
 
     if not full_inventory:
-        print("Inventory is empty. Nothing to do.")
+        logger.warning("Inventory is empty. Nothing to do.")
         return
 
     cisco_devices_to_audit = []
@@ -71,22 +77,22 @@ def main():
         elif dev_type == "aruba_os-cx":
             aruba_devices_to_audit.append(device)
         else:
-            print(
+            logger.warning(
                 f"Warning: Unknown or missing device type '{device.get('device_type')}' for {device.get('host')}. Ignored.")
 
     if cisco_devices_to_audit:
-        print(f"\n--- Starting audit for {len(cisco_devices_to_audit)} Cisco device(s) ---")
+        logger.info(f"--- Starting audit for {len(cisco_devices_to_audit)} Cisco device(s) ---")
         perform_cisco_audit(cisco_devices_to_audit, passwords_map, session_output_directory)
     else:
-        print("\n--- No Cisco devices to audit ---")
+        logger.info("--- No Cisco devices to audit ---")
 
     if aruba_devices_to_audit:
-        print(f"\n--- Starting audit for {len(aruba_devices_to_audit)} Aruba device(s) ---")
+        logger.info(f"--- Starting audit for {len(aruba_devices_to_audit)} Aruba device(s) ---")
         perform_aruba_audit(aruba_devices_to_audit, passwords_map, session_output_directory)
     else:
-        print("\n--- No Aruba devices to audit ---")
+        logger.info("--- No Aruba devices to audit ---")
 
-    print("\n\nAll scheduled audits completed.")
+    logger.info("All scheduled audits completed.")
 
 
 if __name__ == "__main__":
