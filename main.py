@@ -1,0 +1,147 @@
+import logging
+import os
+import json
+import datetime
+import traceback
+from netmiko import ConnectHandler, NetmikoTimeoutException, NetmikoAuthenticationException
+from common.file_utils import load_inventory, load_passwords
+from common.report_generator import generate_excel_report
+from vendors.cisco.cisco_audit import CiscoAudit
+from vendors.aruba.aruba_audit import ArubaAudit
+
+# Logging Configuration
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("network_magpie.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+def main():
+    logger.info("Starting NetworkMagpie Audit...")
+
+    # Configuration
+    inventory_file = "inventory.csv"
+    password_file = "passwords.csv"
+    output_directory = "audit_reports"
+
+    if not os.path.exists(output_directory):
+        os.makedirs(output_directory)
+
+    # Load Data
+    inventory = load_inventory(inventory_file)
+    passwords = load_passwords(password_file)
+
+    if not inventory:
+        logger.error("Inventory is empty or could not be loaded.")
+        return
+    if not passwords:
+        logger.error("Passwords file is empty or could not be loaded.")
+        return
+
+    all_devices_data = []
+
+    for device in inventory:
+        host = device['host']
+        group = device['group']
+        dev_type_csv = device['device_type']
+        
+        logger.info(f"Processing {host} (Group: {group}, Type: {dev_type_csv})...")
+
+        creds = passwords.get(group)
+        if not creds:
+            logger.error(f"Credentials not found for group '{group}'. Skipping {host}.")
+            all_devices_data.append({
+                "attempted_host": host, 
+                "status": "error_connection", 
+                "error_message": f"Credentials not found for group {group}"
+            })
+            continue
+
+        # Determine Audit Class and Netmiko Device Type
+        AuditClass = None
+        netmiko_type = None
+
+        if dev_type_csv in ['cisco_ios', 'cisco_iosxe']:
+            AuditClass = CiscoAudit
+            netmiko_type = 'cisco_ios'
+        elif dev_type_csv in ['aruba_os-cx', 'aruba_aoscx_ssh']:
+            AuditClass = ArubaAudit
+            netmiko_type = 'aruba_aoscx_ssh'
+        else:
+            logger.warning(f"Unknown or unsupported device type '{dev_type_csv}' for {host}.")
+            all_devices_data.append({
+                "attempted_host": host, 
+                "status": "error_connection", 
+                "error_message": f"Unsupported device type: {dev_type_csv}"
+            })
+            continue
+
+        # Prepare Connection Params
+        device_params = {
+            'device_type': netmiko_type,
+            'host': host,
+            'username': creds['username'],
+            'password': creds['password'],
+            'secret': creds.get('enable_password'),
+            'global_delay_factor': 2,
+            'timeout': 45,
+            'session_timeout': 120
+        }
+
+        try:
+            with ConnectHandler(**device_params) as net_connect:
+                # Handle Enable Mode if needed
+                if creds.get('enable_password'):
+                    net_connect.enable()
+                
+                logger.info(f"Connected to {host}. Running audit...")
+                auditor = AuditClass(net_connect)
+                device_data = auditor.run_audit(host)
+                # Mark status as success if not already set (run_audit returns dict without status key usually)
+                device_data['status'] = 'success' 
+                all_devices_data.append(device_data)
+                
+        except (NetmikoTimeoutException, NetmikoAuthenticationException) as e:
+            logger.error(f"Connection/Auth error for {host}: {e}")
+            all_devices_data.append({
+                "attempted_host": host, 
+                "status": "error_connection", 
+                "error_message": str(e)
+            })
+        except Exception as e:
+            logger.error(f"Unexpected error for {host}: {e}")
+            traceback.print_exc()
+            all_devices_data.append({
+                "attempted_host": host, 
+                "status": "error_connection", 
+                "error_message": f"Unexpected error: {e}"
+            })
+
+    # Save Results
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # JSON
+    json_filename = os.path.join(output_directory, f"audit_data_{timestamp}.json")
+    try:
+        with open(json_filename, 'w', encoding='utf-8') as f:
+            json.dump(all_devices_data, f, indent=4, ensure_ascii=False)
+        logger.info(f"Full JSON data saved to {json_filename}")
+    except Exception as e:
+        logger.error(f"Error saving JSON data: {e}")
+
+    # Excel
+    excel_filename = os.path.join(output_directory, f"audit_report_{timestamp}.xlsx")
+    try:
+        generate_excel_report(all_devices_data, excel_filename)
+        logger.info(f"Excel report saved to {excel_filename}")
+    except Exception as e:
+        logger.error(f"Error generating Excel report: {e}")
+
+    logger.info("Audit completed.")
+
+if __name__ == "__main__":
+    main()
