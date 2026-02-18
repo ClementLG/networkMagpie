@@ -20,8 +20,35 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+import argparse
+from common.html_report_generator import generate_html_report
+
 def main():
-    logger.info("Starting NetworkMagpie Audit...")
+    # Argument Parsing
+    parser = argparse.ArgumentParser(description="Network Magpie Audit Tool")
+    parser.add_argument(
+        '-o', '--output',
+        nargs='+',
+        default=['excel'],
+        help="Output formats: json, excel, html. Default: excel. Can be space or comma separated."
+    )
+    args = parser.parse_args()
+
+    # Process output formats (handle commas)
+    selected_outputs = set()
+    for fmt in args.output:
+        for item in fmt.split(','):
+            item = item.strip().lower()
+            if item in ['json', 'excel', 'html']:
+                selected_outputs.add(item)
+            else:
+                print(f"Warning: Unknown output format '{item}' ignored.")
+    
+    # If for some reason nothing valid was selected, default to excel
+    if not selected_outputs:
+        selected_outputs.add('excel')
+
+    logger.info(f"Starting NetworkMagpie Audit... Selected outputs: {', '.join(selected_outputs)}")
 
     # Configuration
     inventory_file = "inventory.csv"
@@ -125,21 +152,32 @@ def main():
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     
     # JSON
-    json_filename = os.path.join(output_directory, f"audit_data_{timestamp}.json")
-    try:
-        with open(json_filename, 'w', encoding='utf-8') as f:
-            json.dump(all_devices_data, f, indent=4, ensure_ascii=False)
-        logger.info(f"Full JSON data saved to {json_filename}")
-    except Exception as e:
-        logger.error(f"Error saving JSON data: {e}")
+    if 'json' in selected_outputs:
+        json_filename = os.path.join(output_directory, f"audit_data_{timestamp}.json")
+        try:
+            with open(json_filename, 'w', encoding='utf-8') as f:
+                json.dump(all_devices_data, f, indent=4, ensure_ascii=False)
+            logger.info(f"Full JSON data saved to {json_filename}")
+        except Exception as e:
+            logger.error(f"Error saving JSON data: {e}")
 
     # Excel
-    excel_filename = os.path.join(output_directory, f"audit_report_{timestamp}.xlsx")
-    try:
-        generate_excel_report(all_devices_data, excel_filename)
-        logger.info(f"Excel report saved to {excel_filename}")
-    except Exception as e:
-        logger.error(f"Error generating Excel report: {e}")
+    if 'excel' in selected_outputs:
+        excel_filename = os.path.join(output_directory, f"audit_report_{timestamp}.xlsx")
+        try:
+            generate_excel_report(all_devices_data, excel_filename)
+            logger.info(f"Excel report saved to {excel_filename}")
+        except Exception as e:
+            logger.error(f"Error generating Excel report: {e}")
+
+    # HTML
+    if 'html' in selected_outputs:
+        html_filename = os.path.join(output_directory, f"audit_report_{timestamp}.html")
+        try:
+            generate_html_report(all_devices_data, html_filename)
+            logger.info(f"HTML report saved to {html_filename}")
+        except Exception as e:
+            logger.error(f"Error generating HTML report: {e}")
 
     logger.info("Audit completed.")
 
