@@ -1,11 +1,12 @@
 import os
 import datetime
 import html
+import shutil
 
 def generate_html_report(all_data, html_filepath):
     """
     Generates a comprehensive HTML report from the collected audit data,
-    formatted for A4 printing.
+    formatted for A4 printing with a cover page and logo.
     
     Args:
         all_data (list): A list of dictionaries containing audit data for all devices.
@@ -14,7 +15,28 @@ def generate_html_report(all_data, html_filepath):
     if not all_data:
         return
 
-    # Basic CSS for A4 printing
+    # 1. Setup Resources
+    report_dir = os.path.dirname(html_filepath)
+    resources_dir = os.path.join(report_dir, "resources")
+    if not os.path.exists(resources_dir):
+        os.makedirs(resources_dir)
+    
+    # Copy logo if it exists
+    # Assuming the script runs from the project root, the logo is in 'imgs/logomagpie.png'
+    project_root = os.getcwd() # Or strictly relative to this file if needed, but cwd is standard here
+    logo_src = os.path.join(project_root, "imgs", "logomagpie.png")
+    logo_dest = os.path.join(resources_dir, "logo.png")
+    
+    logo_html = ""
+    if os.path.exists(logo_src):
+        try:
+            shutil.copy2(logo_src, logo_dest)
+            # Use relative path for HTML
+            logo_html = f'<img src="resources/logo.png" alt="Network Magpie Logo" class="logo">'
+        except Exception as e:
+            print(f"Warning: Could not copy logo: {e}")
+
+    # 2. Enhanced CSS for A4 and Cover Page
     css = """
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700&display=swap');
@@ -30,53 +52,114 @@ def generate_html_report(all_data, html_filepath):
             --border-color: #bdc3c7;
         }
 
+        * {
+            box-sizing: border-box; 
+        }
+
         body {
             font-family: 'Roboto', sans-serif;
-            line-height: 1.6;
+            line-height: 1.4;
             color: #333;
-            max-width: 210mm; /* A4 width */
+            max-width: 210mm;
             margin: 0 auto;
-            padding: 20px;
-            background-color: #f9f9f9;
+            background-color: white;
+        }
+        
+        /* A4 Page Setup */
+        @page {
+            size: A4;
+            margin: 15mm;
+            @bottom-center {
+                content: "Page " counter(page);
+                font-size: 9pt;
+                color: #7f8c8d;
+            }
+        }
+        
+        /* Cover Page Styling */
+        .cover-page {
+            /* Use a fixed height for print, but flexible for screen */
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            page-break-after: always;
+            border: 2px solid var(--primary-color);
+            border-radius: 10px;
+            padding: 40px;
+            margin: 20px auto;
+            min-height: 250mm; /* Ensure it takes up most of the page */
         }
 
+        .logo {
+            max-width: 250px;
+            margin-bottom: 30px;
+        }
+
+        .report-title {
+            font-size: 2.5em;
+            color: var(--primary-color);
+            margin-bottom: 10px;
+        }
+
+        .report-subtitle {
+            font-size: 1.4em;
+            color: var(--secondary-color);
+            margin-bottom: 40px;
+        }
+
+        .report-meta {
+            font-size: 1.1em;
+            color: #7f8c8d;
+            margin-top: auto;
+            padding-bottom: 20px;
+        }
+
+        /* Content Styling */
         h1, h2, h3 {
             color: var(--primary-color);
-        }
-
-        h1 {
-            text-align: center;
-            border-bottom: 2px solid var(--accent-color);
-            padding-bottom: 10px;
-            margin-bottom: 30px;
         }
 
         h2 {
             border-bottom: 1px solid var(--border-color);
             padding-bottom: 5px;
-            margin-top: 40px;
+            margin-top: 20px;
+            margin-bottom: 15px;
+            page-break-after: avoid;
+        }
+
+        h3 {
+            margin-top: 15px;
+            margin-bottom: 10px;
             page-break-after: avoid;
         }
 
         .device-section {
-            background: white;
-            border: 1px solid var(--border-color);
-            border-radius: 5px;
-            padding: 20px;
-            margin-bottom: 30px;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.05);
-            page-break-inside: avoid;
+            padding: 5px 0;
+            margin-bottom: 10px;
+        }
+        
+        img {
+            max-width: 100%;
+            height: auto;
         }
 
         table {
             width: 100%;
             border-collapse: collapse;
-            margin-bottom: 20px;
-            font-size: 12px;
+            margin-bottom: 15px;
+            font-size: 11px;
+            page-break-inside: auto;
+        }
+        
+        tr {
+            page-break-inside: avoid;
+            page-break-after: auto;
         }
 
         th, td {
-            padding: 8px 12px;
+            padding: 6px 8px;
             text-align: left;
             border-bottom: 1px solid var(--light-gray);
         }
@@ -106,37 +189,27 @@ def generate_html_report(all_data, html_filepath):
             font-weight: bold;
         }
 
-        .header-info {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 20px;
-            font-size: 14px;
-            color: var(--secondary-color);
-        }
-
         @media print {
             body {
-                background: white;
-                max-width: 100%;
+                width: 100%;
+                margin: 0;
                 padding: 0;
             }
-            .device-section {
-                box-shadow: none;
+            .cover-page {
+                height: 250mm; /* Constrain height to avoid overflow */
+                max-height: 260mm;
+                margin: 0 auto;
                 border: none;
-                page-break-inside: avoid;
+                padding-top: 50mm;
             }
-            h2 {
-                page-break-before: auto;
-            }
-            a {
-                text-decoration: none;
-                color: black;
-            }
+            /* Reset margins for headers */
+            h2 { margin-top: 10px; }
         }
     </style>
     """
 
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    device_count = len(all_data)
     
     html_content = [f"""
     <!DOCTYPE html>
@@ -148,11 +221,17 @@ def generate_html_report(all_data, html_filepath):
         {css}
     </head>
     <body>
-        <div class="header-info">
-            <span><strong>Generated:</strong> {timestamp}</span>
-            <span><strong>Network Magpie Audit</strong></span>
+        <div class="cover-page">
+            {logo_html}
+            <h1 class="report-title">Network Audit Report</h1>
+            <div class="report-subtitle">Comprehensive Security & Configuration Analysis</div>
+            
+            <div class="report-meta">
+                <p><strong>Date:</strong> {timestamp}</p>
+                <p><strong>Devices Audited:</strong> {device_count}</p>
+                <p><strong>Generated By:</strong> Network Magpie</p>
+            </div>
         </div>
-        <h1>Network Audit Report</h1>
     """]
 
     for device in all_data:
