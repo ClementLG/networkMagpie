@@ -32,6 +32,11 @@ def main():
         default=['excel'],
         help="Output formats: json, excel, html. Default: excel. Can be space or comma separated."
     )
+    parser.add_argument(
+        '-e', '--export-config',
+        action='store_true',
+        help="Export running configuration to text files."
+    )
     args = parser.parse_args()
 
     # Process output formats (handle commas)
@@ -57,6 +62,11 @@ def main():
 
     if not os.path.exists(output_directory):
         os.makedirs(output_directory)
+
+    # Configs directory
+    configs_directory = os.path.join(output_directory, "configs")
+    if args.export_config and not os.path.exists(configs_directory):
+        os.makedirs(configs_directory)
 
     # Load Data
     inventory = load_inventory(inventory_file)
@@ -129,7 +139,27 @@ def main():
                 auditor = AuditClass(net_connect)
                 device_data = auditor.run_audit(host)
                 # Mark status as success if not already set (run_audit returns dict without status key usually)
-                device_data['status'] = 'success' 
+                device_data['status'] = 'success'
+
+                # Handle Config Export if requested
+                if args.export_config and 'running_config' in device_data:
+                    config_content = device_data['running_config']
+                    # Sanitize hostname for filename
+                    safe_hostname = "".join([c for c in host if c.isalpha() or c.isdigit() or c in (' ', '-', '_')]).strip()
+                    config_filename = os.path.join(configs_directory, f"{safe_hostname}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.cfg")
+                    try:
+                        with open(config_filename, 'w', encoding='utf-8') as f:
+                            f.write(config_content)
+                        logger.info(f"Configuration exported to {config_filename}")
+                    except Exception as e:
+                        logger.error(f"Failed to export configuration for {host}: {e}")
+                    
+                    # Remove running_config from data to avoid bloating reports
+                    del device_data['running_config']
+                elif 'running_config' in device_data:
+                     # Remove running_config even if not exporting, to keep reports clean
+                    del device_data['running_config']
+
                 all_devices_data.append(device_data)
                 
         except (NetmikoTimeoutException, NetmikoAuthenticationException) as e:

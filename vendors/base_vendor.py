@@ -51,19 +51,15 @@ class BaseVendor(ABC):
         device_data["interfaces"] = self.get_interfaces()
         device_data["vlans"] = self.get_vlans()
         device_data["arp_table"] = self.get_arp_table()
+        device_data["running_config"] = running_config
         device_data["security_audit"] = self.check_security_features(running_config)
         
         return device_data
 
+    @abstractmethod
     def get_running_config(self):
         """
         Retrieves the running configuration.
-        Can be overridden if the command is different.
+        Must be implemented by subclasses.
         """
-        try:
-            # Default to cisco-like
-            output = self.net_connect.send_command("show running-config", read_timeout=60)
-            return output if output else ""
-        except Exception as e:
-            self.logger.error(f"Error getting running config: {e}")
-            return ""
+        pass
