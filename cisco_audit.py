@@ -21,6 +21,7 @@ import csv
 import os
 import datetime
 import re
+import logging
 from netmiko import ConnectHandler
 from netmiko.exceptions import NetmikoTimeoutException, NetmikoAuthenticationException, SSHException
 import openpyxl
@@ -28,6 +29,8 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 import traceback
 
+# --- Logging Configuration ---
+logger = logging.getLogger(__name__)
 # --- Excel Configuration ---
 GREEN_FILL = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
 ORANGE_FILL = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
@@ -115,7 +118,7 @@ def get_device_info(net_connect):
             if prompt: info['hostname'] = prompt.strip("#> ")
         return info
     except Exception as e:
-        print(f"  Error get_device_info for {net_connect.host}: {e}")
+        logger.error(f"Error get_device_info for {net_connect.host}: {e}")
         return {'hostname': 'Error', 'ios_version': 'Error', 'model': 'Error', 'uptime': 'Error',
                 'serial_number': 'Error'}
 
@@ -208,7 +211,7 @@ def get_interfaces(net_connect):
             })
         return interfaces
     except Exception as e:
-        print(f"  Critical error in get_interfaces for {net_connect.host}: {e}")
+        logger.critical(f"Critical error in get_interfaces for {net_connect.host}: {e}")
         traceback.print_exc()
         return []
 
@@ -236,7 +239,9 @@ def get_vlans(net_connect):
                               "status": vlan_entry.get('status', 'N/A'), "ports": ports_str})
         return vlans
     except Exception as e:
-        print(f"  Critical error in get_vlans for {net_connect.host}: {e}"); traceback.print_exc(); return []
+        logger.critical(f"Critical error in get_vlans for {net_connect.host}: {e}")
+        traceback.print_exc()
+        return []
 
 
 def get_arp_table(net_connect):
@@ -263,7 +268,9 @@ def get_arp_table(net_connect):
                     "type": entry.get('type', 'N/A'), "interface": entry.get('interface', 'N/A')})
         return arp_table
     except Exception as e:
-        print(f"  Critical error in get_arp_table for {net_connect.host}: {e}"); traceback.print_exc(); return []
+        logger.critical(f"Critical error in get_arp_table for {net_connect.host}: {e}")
+        traceback.print_exc()
+        return []
 
 
 def check_security_features(net_connect, running_config):
@@ -371,9 +378,10 @@ def check_security_features(net_connect, running_config):
                 security_audit["ssh_v2_only"] = {"status": False, "level": "bad",
                                                  "details": "SSH does not seem to be enabled or configured correctly."}
     except Exception as e:
-        print(f"  SSH check error for {net_connect.host}: {e}"); security_audit["ssh_v2_only"] = {"status": "Error",
-                                                                                                    "level": "warning",
-                                                                                                    "details": "SSH check impossible."}
+        logger.warning(f"SSH check error for {net_connect.host}: {e}")
+        security_audit["ssh_v2_only"] = {"status": "Error",
+                                         "level": "warning",
+                                         "details": "SSH check impossible."}
 
     if "transport input telnet" in vty_config_text.lower():
         security_audit["vty_transport_telnet"] = {"status": "Telnet Enabled", "level": "bad",
@@ -509,7 +517,8 @@ def check_security_features(net_connect, running_config):
                                                        "level": "bad",
                                                        "details": f"Physical ports not connected but active: {', '.join(active_unused)}. Risk. Shutdown them."}
     except Exception as e:
-        print(f"  Error unused_ports check for {net_connect.host}: {e}"); security_audit["unused_physical_ports"] = {
+        logger.warning(f"Error unused_ports check for {net_connect.host}: {e}")
+        security_audit["unused_physical_ports"] = {
             "status": "Error", "level": "warning", "details": f"Unused ports check impossible: {e}"}
 
     # --- IV. Logging & Monitoring ---
@@ -644,22 +653,26 @@ def load_inventory(filepath="inventory.csv"):
             try:
                 header = next(reader)
                 if len(header) < 3:
-                    print(
-                        f"Error: Inventory header '{filepath}' must have at least 3 columns (hostname, group, device_type).")
+                    logger.error(
+                        f"Inventory header '{filepath}' must have at least 3 columns (hostname, group, device_type).")
                     return None
             except StopIteration:
-                print(f"Warning: Inventory file '{filepath}' is empty."); return []
+                logger.warning(f"Inventory file '{filepath}' is empty.")
+                return []
             for row in reader:
                 if len(row) >= 3 and row[0].strip():
                     inventory.append(
                         {"host": row[0].strip(), "group": row[1].strip(), "device_type": row[2].strip().lower()})
                 elif row and any(field.strip() for field in row):
-                    print(f"Warning: Malformed inventory row: {row}")
+                    logger.warning(f"Malformed inventory row: {row}")
         return inventory
     except FileNotFoundError:
-        print(f"Error: Inventory file '{filepath}' not found."); return None
+        logger.error(f"Inventory file '{filepath}' not found.")
+        return None
     except Exception as e:
-        print(f"Error reading '{filepath}': {e}"); traceback.print_exc(); return None
+        logger.error(f"Error reading '{filepath}': {e}")
+        traceback.print_exc()
+        return None
 
 
 def load_passwords(filepath="passwords.csv"):
@@ -680,19 +693,23 @@ def load_passwords(filepath="passwords.csv"):
             try:
                 next(reader)
             except StopIteration:
-                print(f"Warning: Passwords file '{filepath}' is empty."); return {}
+                logger.warning(f"Passwords file '{filepath}' is empty.")
+                return {}
             for row in reader:
                 if len(row) >= 3 and row[0].strip():
                     enable_pass = row[3].strip() if len(row) > 3 and row[3].strip() else None
                     passwords[row[0].strip()] = {"username": row[1].strip(), "password": row[2].strip(),
                                                  "enable_password": enable_pass}
                 elif row and any(field.strip() for field in row):
-                    print(f"Warning: Malformed passwords row: {row}")
+                    logger.warning(f"Malformed passwords row: {row}")
         return passwords
     except FileNotFoundError:
-        print(f"Error: Passwords file '{filepath}' not found."); return None
+        logger.error(f"Passwords file '{filepath}' not found.")
+        return None
     except Exception as e:
-        print(f"Error reading '{filepath}': {e}"); traceback.print_exc(); return None
+        logger.error(f"Error reading '{filepath}': {e}")
+        traceback.print_exc()
+        return None
 
 
 def generate_excel_report(all_data, excel_filepath):  # Modified to take full path
@@ -703,12 +720,14 @@ def generate_excel_report(all_data, excel_filepath):  # Modified to take full pa
         all_data (list): A list of dictionaries containing audit data for all devices.
         excel_filepath (str): The file path where the Excel report will be saved.
     """
-    if not all_data: print("No data for Excel report."); return
-    wb = openpyxl.Workbook();
+    if not all_data:
+        logger.warning("No data for Excel report.")
+        return
+    wb = openpyxl.Workbook()
     wb.remove(wb.active)
     ws_info = wb.create_sheet("General Info")
     headers_info = ["Hostname", "IP Address", "Model", "IOS Version", "Uptime", "Serial Number"]
-    ws_info.append(headers_info);
+    ws_info.append(headers_info)
     apply_header_style(ws_info)
     for dev_data in all_data:
         if dev_data.get('status') == 'error_connection':
@@ -725,7 +744,7 @@ def generate_excel_report(all_data, excel_filepath):  # Modified to take full pa
     ws_interfaces = wb.create_sheet("Interfaces")
     headers_interfaces = ["Hostname", "Interface", "Type", "Description", "IP Address", "Link Status",
                           "Protocol Status", "VLAN (Access)", "Duplex", "Speed"]
-    ws_interfaces.append(headers_interfaces);
+    ws_interfaces.append(headers_interfaces)
     apply_header_style(ws_interfaces)
     for dev_data in all_data:
         if dev_data.get('status') == 'error_connection': continue
@@ -751,7 +770,7 @@ def generate_excel_report(all_data, excel_filepath):  # Modified to take full pa
     auto_fit_columns(ws_interfaces)
     ws_vlans = wb.create_sheet("VLANs")
     headers_vlans = ["Hostname", "VLAN ID", "VLAN Name", "Status", "Assigned Ports"]
-    ws_vlans.append(headers_vlans);
+    ws_vlans.append(headers_vlans)
     apply_header_style(ws_vlans)
     for dev_data in all_data:
         if dev_data.get('status') == 'error_connection': continue
@@ -766,7 +785,7 @@ def generate_excel_report(all_data, excel_filepath):  # Modified to take full pa
     auto_fit_columns(ws_vlans)
     ws_arp = wb.create_sheet("ARP Table")
     headers_arp = ["Hostname", "Protocol", "IP Address", "Age (min)", "MAC Address", "Type", "Interface"]
-    ws_arp.append(headers_arp);
+    ws_arp.append(headers_arp)
     apply_header_style(ws_arp)
     for dev_data in all_data:
         if dev_data.get('status') == 'error_connection': continue
@@ -778,7 +797,7 @@ def generate_excel_report(all_data, excel_filepath):  # Modified to take full pa
     auto_fit_columns(ws_arp)
     ws_security = wb.create_sheet("Security Audit")
     headers_security = ["Hostname", "Check Name", "Status/Value", "Level", "Details/Recommendation"]
-    ws_security.append(headers_security);
+    ws_security.append(headers_security)
     apply_header_style(ws_security)
     for dev_data in all_data:
         if dev_data.get('status') == 'error_connection': continue
@@ -792,9 +811,10 @@ def generate_excel_report(all_data, excel_filepath):  # Modified to take full pa
     auto_fit_columns(ws_security)
     # excel_filepath is now passed as an argument
     try:
-        wb.save(excel_filepath); print(f"\n[+] Excel report generated: {excel_filepath}")
+        wb.save(excel_filepath)
+        logger.info(f"[+] Excel report generated: {excel_filepath}")
     except Exception as e:
-        print(f"\n[-] Error saving Excel: {e}")
+        logger.error(f"[-] Error saving Excel: {e}")
 
 
 def perform_cisco_audit(cisco_devices_inventory, global_passwords_map, output_directory):
@@ -811,9 +831,9 @@ def perform_cisco_audit(cisco_devices_inventory, global_passwords_map, output_di
     for device_entry in cisco_devices_inventory:
         host, group = device_entry["host"], device_entry["group"]
         creds = global_passwords_map.get(group)
-        print(f"\n[INFO Cisco] Processing {host} (group: {group})...")
+        logger.info(f"Processing {host} (group: {group})...")
         if not creds:
-            print(f"  [ERROR Cisco] Credentials not found for group '{group}'. {host} skipped.")
+            logger.error(f"Credentials not found for group '{group}'. {host} skipped.")
             all_devices_data.append({"attempted_host": host, "status": "error_connection",
                                      "error_message": f"Credentials not found for group {group}"})
             continue
@@ -826,7 +846,7 @@ def perform_cisco_audit(cisco_devices_inventory, global_passwords_map, output_di
             with ConnectHandler(**dev_params) as net_connect:
                 actual_host, actual_prompt = net_connect.host, (
                     net_connect.base_prompt[:-1] if net_connect.base_prompt else net_connect.host)
-                print(f"  [OK Cisco] Connected to {actual_host} ({actual_prompt}).")
+                logger.info(f"Connected to {actual_host} ({actual_prompt}).")
                 if creds.get('enable_password'): net_connect.enable()
 
                 current_device_data["general_info"] = get_device_info(net_connect)
@@ -841,14 +861,14 @@ def perform_cisco_audit(cisco_devices_inventory, global_passwords_map, output_di
                 current_device_data["security_audit"] = check_security_features(net_connect, running_config)
                 all_devices_data.append(current_device_data)
         except (NetmikoTimeoutException, SSHException) as e:
-            print(f"  [ERROR Cisco] Connection to {host} (Timeout/SSH): {e}")
+            logger.error(f"Connection to {host} (Timeout/SSH): {e}")
             all_devices_data.append({"attempted_host": host, "status": "error_connection", "error_message": str(e)})
         except NetmikoAuthenticationException as e:
-            print(f"  [ERROR Cisco] Authentication on {host}: {e}")
+            logger.error(f"Authentication on {host}: {e}")
             all_devices_data.append(
                 {"attempted_host": host, "status": "error_connection", "error_message": f"Authentication failed: {e}"})
         except Exception as e:
-            print(f"  [ERROR Cisco] Unexpected with {host}: {e}");
+            logger.error(f"Unexpected with {host}: {e}")
             traceback.print_exc()
             all_devices_data.append(
                 {"attempted_host": host, "status": "error_connection", "error_message": f"Unexpected error: {e}"})
@@ -858,13 +878,13 @@ def perform_cisco_audit(cisco_devices_inventory, global_passwords_map, output_di
     try:
         with open(json_filename, 'w', encoding='utf-8') as f:
             json.dump(all_devices_data, f, indent=4, ensure_ascii=False)
-        print(f"\n[+] Cisco JSON data saved: {json_filename}")
+        logger.info(f"[+] Cisco JSON data saved: {json_filename}")
     except Exception as e:
-        print(f"\n[-] Error saving Cisco JSON: {e}")
+        logger.error(f"[-] Error saving Cisco JSON: {e}")
 
     excel_report_path = os.path.join(output_directory, f"audit_cisco_report_{timestamp}.xlsx")
     generate_excel_report(all_devices_data, excel_report_path)
-    print(f"\n[+] Cisco audit completed for {len(cisco_devices_inventory)} device(s).")
+    logger.info(f"Cisco audit completed for {len(cisco_devices_inventory)} device(s).")
 
 
 def main():
@@ -872,24 +892,28 @@ def main():
     Main entry point for standalone execution of the Cisco audit script.
     Loads inventory, credentials, filter for Cisco devices, and starts the audit.
     """
+    # Basic logging setup for standalone run
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
     inventory_file, password_file, output_directory = "inventory.csv", "passwords.csv", "audit_reports"
     if not os.path.exists(output_directory):
         try:
             os.makedirs(output_directory)
         except OSError as e:
-            print(f"Error creating directory '{output_directory}': {e}"); return
+            logger.error(f"Error creating directory '{output_directory}': {e}")
+            return
 
     full_inventory = load_inventory(inventory_file)
     passwords_map = load_passwords(password_file)
 
     if full_inventory is None or passwords_map is None:
-        print("Stop (Cisco): Critical errors loading input files.");
+        logger.error("Stop (Cisco): Critical errors loading input files.")
         return
 
     cisco_devices = [device for device in full_inventory if device.get("device_type") in ["cisco_ios", "cisco_iosxe"]]
 
     if not cisco_devices:
-        print("No Cisco devices (cisco_ios/cisco_iosxe) found in inventory for autonomous audit.")
+        logger.warning("No Cisco devices (cisco_ios/cisco_iosxe) found in inventory for autonomous audit.")
         return
 
     perform_cisco_audit(cisco_devices, passwords_map, output_directory)
